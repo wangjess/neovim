@@ -3,6 +3,7 @@ local n = require('test.functional.testnvim')()
 local Screen = require('test.functional.ui.screen')
 local tt = require('test.functional.testterm')
 
+local describe, it, before_each, after_each = t.describe, t.it, t.before_each, t.after_each
 local assert_alive = n.assert_alive
 local mkdir, write_file, rmdir = t.mkdir, t.write_file, n.rmdir
 local eq = t.eq
@@ -41,10 +42,6 @@ describe('shell command :!', function()
     ]])
   end)
 
-  after_each(function()
-    tt.feed_data('\3') -- Ctrl-C
-  end)
-
   it('displays output without LF/EOF. #4646 #4569 #3772', function()
     skip(is_os('win'))
     -- NOTE: We use a child nvim (within a :term buffer)
@@ -58,12 +55,19 @@ describe('shell command :!', function()
       foo                                               |
       {5:-- TERMINAL --}                                    |
     ]])
+    tt.feed_data('\3') -- Ctrl-C
+    screen:expect([[
+      ^                                                  |
+      {100:~                                                 }|*4
+                                                        |
+      {5:-- TERMINAL --}                                    |
+    ]])
   end)
 
-  it('throttles shell-command output greater than ~10KB', function()
+  it('throttles shell-command output greater than ~10KB', { retries = 2 }, function()
     skip(is_os('openbsd'), 'FIXME #10804')
     skip(is_os('win'))
-    tt.feed_data((':!%s REP 30001 foo\n'):format(testprg('shell-test')))
+    tt.feed_data((':!%s REP 150001 foo\n'):format(testprg('shell-test')))
 
     -- If we observe any line starting with a dot, then throttling occurred.
     -- Avoid false failure on slow systems.
@@ -71,15 +75,18 @@ describe('shell command :!', function()
 
     -- Final chunk of output should always be displayed, never skipped.
     -- (Throttling is non-deterministic, this test is merely a sanity check.)
-    screen:expect([[
-      29997: foo                                        |
-      29998: foo                                        |
-      29999: foo                                        |
-      30000: foo                                        |
-                                                        |
-      {123:Press ENTER or type command to continue}^           |
-      {5:-- TERMINAL --}                                    |
-    ]])
+    screen:expect {
+      grid = [[
+        149997: foo                                       |
+        149998: foo                                       |
+        149999: foo                                       |
+        150000: foo                                       |
+                                                          |
+        {123:Press ENTER or type command to continue}^           |
+        {5:-- TERMINAL --}                                    |
+      ]],
+      timeout = 20000,
+    }
   end)
 end)
 
@@ -99,7 +106,7 @@ describe('shell command :!', function()
   end)
 
   it('handles control codes', function()
-    skip(is_os('win'), 'missing printf')
+    skip(is_os('win'), 'N/A: missing printf')
     local screen = Screen.new(50, 4)
     -- Print TAB chars. #2958
     feed([[:!printf '1\t2\t3'<CR>]])

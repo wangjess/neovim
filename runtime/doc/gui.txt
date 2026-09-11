@@ -47,60 +47,87 @@ can connect to any Nvim instance).
 Example: this sets "g:gui" to the value of the UI's "rgb" field:    >
         :autocmd UIEnter * let g:gui = filter(nvim_list_uis(),{k,v-> v.chan==v:event.chan})[0].rgb
 <
+								*ui-lifecycle*
+Nvim's |clientserver| architecture allows you to |:restart|, |:detach| (Nvim
+continues in the background), or |:connect| to another instance.
+
+Use cases:
+- keep the session running on remote machines after (unexpected) SSH disconnect
+- open files in an existing session from your OS file explorer
+- run Nvim as a background process (daemon/service), atttach/detach as needed
+
 ------------------------------------------------------------------------------
 Stop or detach the current UI
 
-                                                *:detach*
-:detach
-                Detaches the current UI. Other UIs (if any) remain attached.
-                The server (typically `nvim --embed`) continues running as
-                a background process, and you can reattach to it later.
-                Before detaching, you may want to note the server address:
+                                                             *:detach* *E5768*
+:[range]detach  Detaches the current UI. Other UIs (if any) remain attached,
+                unless [range] was given. If [range] is "%", all UIs _except_
+                the current UI are detached: >vim
+
+                    :%detach
+
+<                The server (typically `nvim --embed`) continues running as
+                a background process. Use |:connect| or |--remote-ui| to
+                reattach. Before detaching, you may want to note the server
+                address:
                 >vim
                     :echo v:servername
 <
-                Note: The server closes the UI RPC channel, so :detach
-                inherently "works" for all UIs. But if a UI isn't expecting
-                the channel to be closed, it may be (incorrectly) reported as
-                an error.
+                Note: The server closes the UI RPC channel, so :detach works
+                for any GUI/UI; but if the client isn't expecting this, it may
+                (incorrectly) report an error.
 
-                Note: Not supported on Windows yet.
+                                                                    *:detach!*
+:detach!        Marks the current UI as "detachable" without detaching it now:
+                the UI stays attached, but if it later disconnects
+                unexpectedly (e.g. host terminal closed, ssh disconnect,
+                etc.), the server keeps running in the background.
+                Use |:connect| or |--remote-ui| to reattach.
+
+                If you always want Nvim to survive accidental disconnect, put
+                this in your config: >vim
+
+                    silent detach!
+<
 
 ------------------------------------------------------------------------------
 Restart Nvim
 
-                                                *:restart*
-:restart [+cmd] [command]
-                Restarts Nvim.
+                                                *:restart* *:restart!* *E5201*
+:restart[!] [+cmd] [command]
+                Restarts Nvim. Saves and restores the current session, unless
+                [!] is given. Sets |v:exitreason|. See also |ZR|.
 
-                1. Stops Nvim using `:qall!` (or |+cmd|, if given).
-                2. Starts a new Nvim server using the same |v:argv|,
-                   optionally running [command] at startup. |-c|
-                3. Attaches the current UI to the new Nvim server. Other UIs
-                   (if any) will not reattach on restart (this may change in
-                   the future).
+                1. Saves the current session (unless [!] was given).
+                2. Stops Nvim using `:qall` (or |+cmd|, if given).
+                3. Starts a new Nvim server using the same |v:argv| (except
+                   `-- [file…]` files and `-S [file]`), and sets |v:startreason|.
+                4. Restores the saved session (unless [!] was given).
+                5. Attaches all UIs to the new Nvim server and runs `[command]`
+                   on it.
 
-                Use with `:confirm` to prompt if changes have been made.
-
-                Example: stop with `:qall!`, then restart: >
+                Example: discard changes and stop with `:qall!`, then restart: >
                     :restart +qall!
-<                Example: restart and restore the current session: >
-                    :mksession! Session.vim | restart source Session.vim
+<                Example: restart and (manually) restore the session: >
+                    :mksession! Session.vim | restart! source Session.vim
 <                Example: restart and update plugins: >
-                    :restart +qall! lua vim.pack.update()
+                    :restart packupdate
 <
-                Note: Only works if the UI and server are on the same system.
-                Note: If the UI hasn't implemented the "restart" UI event,
-                this command is equivalent to `:qall!`.
+                Note:
+                • Only works if the UI and server are on the same system.
+                • Windows limitation: during +cmd execution, |v:servername|
+                  refers to a temporary address.
+                • If no UI handles the "restart" event, this leaves a dangling
+                  process.
+                • To adjust what `:restart` restores, set 'sessionoptions'.
 
 ------------------------------------------------------------------------------
 Connect UI to a different server
 
                                                 *:connect*
-
 :connect {address}
-                Detaches the UI from the server it is currently attached to
-                and attaches it to the server at {address} instead.
+                Attaches the UI to another Nvim instance: detaches from the
+                current server, then attaches to {address}.
 
                 Note: If the current UI hasn't implemented the "connect" UI
                 event, this command is equivalent to |:detach|.
@@ -144,7 +171,7 @@ Normal Mode: >
                  cursor                       window
   ---------------------------------------------------------------------------
   <LeftMouse>     yes          end              yes
-  <C-LeftMouse>   yes          end              yes    "CTRL-]" (2)
+  <C-LeftMouse>   no        no change           no     toggle multicursor
   <S-LeftMouse>   yes       no change           yes    "*" (2)
   <LeftDrag>      yes     start or extend (1)   no
   <LeftRelease>   yes     start or extend (1)   no
@@ -162,7 +189,7 @@ Insert or Replace Mode: >
                  cursor                       window
   ---------------------------------------------------------------------------
   <LeftMouse>     yes     (cannot be active)    yes
-  <C-LeftMouse>   yes     (cannot be active)    yes    "CTRL-O^]" (2)
+  <C-LeftMouse>   no      (cannot be active)    no     no-op
   <S-LeftMouse>   yes     (cannot be active)    yes    "CTRL-O*" (2)
   <LeftDrag>      yes     start or extend (1)   no     like CTRL-O (1)
   <LeftRelease>   yes     start or extend (1)   no     like CTRL-O (1)
@@ -329,26 +356,26 @@ configure which ones appear with the 'guioptions' option.
 
 The interface looks like this (with `:set guioptions=mlrb`):
 >
-                       +------------------------------+ `
-                       | File  Edit              Help | <- Menu bar (m) `
-                       +-+--------------------------+-+ `
-                       |^|                          |^| `
-                       |#| Text area.               |#| `
-                       | |                          | | `
-                       |v|__________________________|v| `
- Normal status line -> |-+ File.c              5,2  +-| `
- between Vim windows   |^|""""""""""""""""""""""""""|^| `
-                       | |                          | | `
-                       | | Another file buffer.     | | `
-                       | |                          | | `
-                       |#|                          |#| `
- Left scrollbar (l) -> |#|                          |#| <- Right `
-                       |#|                          |#|    scrollbar (r) `
-                       | |                          | | `
-                       |v|                          |v| `
-                       +-+--------------------------+-+ `
-                       | |< ####                   >| | <- Bottom `
-                       +-+--------------------------+-+    scrollbar (b) `
+                       +------------------------------+
+                       | File  Edit              Help | <- Menu bar (m)
+                       +-+--------------------------+-+
+                       |^|                          |^|
+                       |#| Text area.               |#|
+                       | |                          | |
+                       |v|__________________________|v|
+ Normal status line -> |-+ File.c              5,2  +-|
+ between Vim windows   |^|""""""""""""""""""""""""""|^|
+                       | |                          | |
+                       | | Another file buffer.     | |
+                       | |                          | |
+                       |#|                          |#|
+ Left scrollbar (l) -> |#|                          |#| <- Right
+                       |#|                          |#|    scrollbar (r)
+                       | |                          | |
+                       |v|                          |v|
+                       +-+--------------------------+-+
+                       | |< ####                   >| | <- Bottom
+                       +-+--------------------------+-+    scrollbar (b)
 <
 Any of the scrollbar or menu components may be turned off by not putting the
 appropriate letter in the 'guioptions' string.  The bottom scrollbar is
@@ -462,7 +489,7 @@ Creating New Menus                                      *creating-menus*
 
                                 *:me*  *:menu*  *:noreme*  *:noremenu*
                                 *E330* *E327* *E331* *E336* *E333*
-                                *E328* *E329* *E337* *E792*
+                                *E328* *E329* *E337* *E792* *E1310*
 To create a new menu item, use the ":menu" commands.  They are mostly like
 the ":map" set of commands (see |map-modes|), but the first argument is a menu
 item name, given as a path of menus and submenus with a '.' between them,

@@ -44,7 +44,7 @@ void stream_init(Loop *loop, Stream *stream, int fd, uv_stream_t *uvstream)
   FUNC_ATTR_NONNULL_ARG(2)
 {
   // The underlying stream is either a file or an existing uv stream.
-  assert(uvstream == NULL ? fd >= 0 : fd < 0);
+  assert(uvstream == NULL ? fd >= 0 && loop != NULL : fd < 0 && loop == NULL);
   stream->uvstream = uvstream;
 
   if (fd >= 0) {
@@ -57,26 +57,22 @@ void stream_init(Loop *loop, Stream *stream, int fd, uv_stream_t *uvstream)
       // processed between reads.
       uv_idle_init(&loop->uv, &stream->uv.idle);
       stream->uv.idle.data = stream;
+#ifdef MSWIN
+    } else if (type == UV_TTY) {
+      uv_tty_init(&loop->uv, &stream->uv.tty, fd, 0);
+      uv_tty_set_mode(&stream->uv.tty, UV_TTY_MODE_RAW);
+      DWORD dwMode;
+      if (GetConsoleMode(stream->uv.tty.handle, &dwMode)) {
+        dwMode |= ENABLE_VIRTUAL_TERMINAL_INPUT;
+        SetConsoleMode(stream->uv.tty.handle, dwMode);
+      }
+      stream->uvstream = (uv_stream_t *)&stream->uv.tty;
+#endif
     } else {
       assert(type == UV_NAMED_PIPE || type == UV_TTY);
-#ifdef MSWIN
-      if (type == UV_TTY) {
-        uv_tty_init(&loop->uv, &stream->uv.tty, fd, 0);
-        uv_tty_set_mode(&stream->uv.tty, UV_TTY_MODE_RAW);
-        DWORD dwMode;
-        if (GetConsoleMode(stream->uv.tty.handle, &dwMode)) {
-          dwMode |= ENABLE_VIRTUAL_TERMINAL_INPUT;
-          SetConsoleMode(stream->uv.tty.handle, dwMode);
-        }
-        stream->uvstream = (uv_stream_t *)&stream->uv.tty;
-      } else {
-#endif
       uv_pipe_init(&loop->uv, &stream->uv.pipe, 0);
       uv_pipe_open(&stream->uv.pipe, fd);
       stream->uvstream = (uv_stream_t *)&stream->uv.pipe;
-#ifdef MSWIN
-    }
-#endif
     }
   }
 
@@ -134,6 +130,11 @@ void stream_close_handle(Stream *stream)
 
   assert(handle != NULL);
 
+  if (stream->before_close_cb) {
+    stream->pending_reqs++;
+    stream->before_close_cb(stream, stream->close_cb_data);
+    stream->pending_reqs--;
+  }
   if (!uv_is_closing(handle)) {
     uv_close(handle, close_cb);
   }
@@ -142,6 +143,8 @@ void stream_close_handle(Stream *stream)
 static void close_cb(uv_handle_t *handle)
 {
   Stream *stream = handle->data;
+  // Check if handle->data is NULL here, in case this callback is called between
+  // the handle's initialization and stream_init().
   if (stream && stream->close_cb) {
     stream->close_cb(stream, stream->close_cb_data);
   }

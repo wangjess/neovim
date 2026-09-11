@@ -28,11 +28,21 @@ bool os_has_conpty_working(void)
 
 TriState os_dyn_conpty_init(void)
 {
-  uv_lib_t kernel;
-  if (uv_dlopen("kernel32.dll", &kernel)) {
-    uv_dlclose(&kernel);
-    return kFalse;
+  uv_lib_t conpty_lib;
+
+  if (!uv_dlopen("conpty.dll", &conpty_lib)) {
+    ILOG("Loaded new ConPTY from conpty.dll");
+  } else {
+    // uv_dlopen() allocates an error message even on failure, so close the
+    // handle before reusing conpty_lib for the system ConPTY fallback.
+    uv_dlclose(&conpty_lib);
+    if (uv_dlopen("kernel32.dll", &conpty_lib)) {
+      uv_dlclose(&conpty_lib);
+      return kFalse;
+    }
+    ILOG("Loaded system ConPTY from kernel32.dll");
   }
+
   static struct {
     char *name;
     FARPROC *ptr;
@@ -44,8 +54,8 @@ TriState os_dyn_conpty_init(void)
   };
   for (int i = 0;
        conpty_entry[i].name != NULL && conpty_entry[i].ptr != NULL; i++) {
-    if (uv_dlsym(&kernel, conpty_entry[i].name, (void **)conpty_entry[i].ptr)) {
-      uv_dlclose(&kernel);
+    if (uv_dlsym(&conpty_lib, conpty_entry[i].name, (void **)conpty_entry[i].ptr)) {
+      uv_dlclose(&conpty_lib);
       return kFalse;
     }
   }
@@ -169,13 +179,14 @@ void os_conpty_set_size(conpty_t *conpty_object, uint16_t width, uint16_t height
   assert(height <= SHRT_MAX);
   COORD size = { (int16_t)width, (int16_t)height };
   if (pResizePseudoConsole(conpty_object->pty, size) != S_OK) {
-    ELOG("ResizePseudoConsoel failed: error code: %d",
+    ELOG("ResizePseudoConsole failed: error code: %d",
          os_translate_sys_error((int)GetLastError()));
   }
 }
 
-void os_conpty_free(conpty_t *conpty_object)
+void os_conpty_free(void *data)
 {
+  conpty_t *conpty_object = data;
   if (conpty_object != NULL) {
     if (conpty_object->si_ex.lpAttributeList != NULL) {
       DeleteProcThreadAttributeList(conpty_object->si_ex.lpAttributeList);

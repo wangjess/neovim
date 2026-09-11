@@ -929,7 +929,7 @@ func Test_edit_CTRL_S()
   bw!
 endfunc
 
-func Test_edit_CTRL_T()
+func Edit_CTRL_T()
   " Check for CTRL-T and CTRL-X CTRL-T in insert mode
   " 1) increase indent
   new
@@ -1000,6 +1000,29 @@ func Test_edit_CTRL_T()
   endtry
   call assert_equal(['mad'], getline(1, '$'))
   bw!
+endfunc
+
+func Test_edit_CTRL_T()
+  call Edit_CTRL_T()
+  set completeopt+=fuzzy
+  call Edit_CTRL_T()
+  set completeopt&
+endfunc
+
+func Test_edit_CTRL_T_longest()
+  " CTRL-X CTRL-T (thesaurus complete) with 'longest' should not insert
+  " longest match
+  set completeopt+=longest
+  new
+  call writefile(['angry furious mad madder maddest'], 'Xthesaurus', 'D')
+  set thesaurus=Xthesaurus
+  call setline(1, 'mad')
+  call cursor(1, 1)
+  call feedkeys("A\<c-x>\<c-t>\<cr>\<esc>", 'tnix')
+  call assert_equal(['mad', ''], getline(1, '$'))
+  bw!
+  set thesaurus=
+  set completeopt&
 endfunc
 
 " Test thesaurus completion with different encodings
@@ -1374,97 +1397,97 @@ func Test_edit_PAGEUP_PAGEDOWN()
   10new
   call setline(1, repeat(['abc def ghi'], 30))
   call cursor(1, 1)
-  call feedkeys("i\<PageDown>\<esc>", 'tnix')
+  call assert_nobeep('call feedkeys("i\<PageDown>\<esc>", "tnix")')
   call assert_equal([0, 9, 1, 0], getpos('.'))
-  call feedkeys("i\<PageDown>\<esc>", 'tnix')
+  call assert_nobeep('call feedkeys("i\<PageDown>\<esc>", "tnix")')
   call assert_equal([0, 17, 1, 0], getpos('.'))
-  call feedkeys("i\<PageDown>\<esc>", 'tnix')
+  call assert_nobeep('call feedkeys("i\<PageDown>\<esc>", "tnix")')
   call assert_equal([0, 25, 1, 0], getpos('.'))
-  call feedkeys("i\<PageDown>\<esc>", 'tnix')
+  call assert_nobeep('call feedkeys("i\<PageDown>\<esc>", "tnix")')
   call assert_equal([0, 30, 1, 0], getpos('.'))
-  call feedkeys("i\<PageDown>\<esc>", 'tnix')
+  call assert_beeps('call feedkeys("i\<PageDown>\<esc>", "tnix")')
   call assert_equal([0, 30, 1, 0], getpos('.'))
-  call feedkeys("A\<PageUp>\<esc>", 'tnix')
+  call assert_nobeep('call feedkeys("A\<PageUp>\<esc>", "tnix")')
   call assert_equal([0, 29, 1, 0], getpos('.'))
-  call feedkeys("A\<PageUp>\<esc>", 'tnix')
+  call assert_nobeep('call feedkeys("A\<PageUp>\<esc>", "tnix")')
   call assert_equal([0, 21, 1, 0], getpos('.'))
-  call feedkeys("A\<PageUp>\<esc>", 'tnix')
+  call assert_nobeep('call feedkeys("A\<PageUp>\<esc>", "tnix")')
   call assert_equal([0, 13, 1, 0], getpos('.'))
-  call feedkeys("A\<PageUp>\<esc>", 'tnix')
+  call assert_nobeep('call feedkeys("A\<PageUp>\<esc>", "tnix")')
   call assert_equal([0, 10, 1, 0], getpos('.'))
-  call feedkeys("A\<PageUp>\<esc>", 'tnix')
+  call assert_beeps('call feedkeys("A\<PageUp>\<esc>", "tnix")')
   call assert_equal([0, 10, 11, 0], getpos('.'))
   " <S-Up> is the same as <PageUp>
   " <S-Down> is the same as <PageDown>
   call cursor(1, 1)
-  call feedkeys("i\<S-Down>\<esc>", 'tnix')
+  call assert_nobeep('call feedkeys("i\<S-Down>\<esc>", "tnix")')
   call assert_equal([0, 9, 1, 0], getpos('.'))
-  call feedkeys("i\<S-Down>\<esc>", 'tnix')
+  call assert_nobeep('call feedkeys("i\<S-Down>\<esc>", "tnix")')
   call assert_equal([0, 17, 1, 0], getpos('.'))
-  call feedkeys("i\<S-Down>\<esc>", 'tnix')
+  call assert_nobeep('call feedkeys("i\<S-Down>\<esc>", "tnix")')
   call assert_equal([0, 25, 1, 0], getpos('.'))
-  call feedkeys("i\<S-Down>\<esc>", 'tnix')
+  call assert_nobeep('call feedkeys("i\<S-Down>\<esc>", "tnix")')
   call assert_equal([0, 30, 1, 0], getpos('.'))
-  call feedkeys("i\<S-Down>\<esc>", 'tnix')
+  call assert_beeps('call feedkeys("i\<S-Down>\<esc>", "tnix")')
   call assert_equal([0, 30, 1, 0], getpos('.'))
-  call feedkeys("A\<S-Up>\<esc>", 'tnix')
+  call assert_nobeep('call feedkeys("A\<S-Up>\<esc>", "tnix")')
   call assert_equal([0, 29, 1, 0], getpos('.'))
-  call feedkeys("A\<S-Up>\<esc>", 'tnix')
+  call assert_nobeep('call feedkeys("A\<S-Up>\<esc>", "tnix")')
   call assert_equal([0, 21, 1, 0], getpos('.'))
-  call feedkeys("A\<S-Up>\<esc>", 'tnix')
+  call assert_nobeep('call feedkeys("A\<S-Up>\<esc>", "tnix")')
   call assert_equal([0, 13, 1, 0], getpos('.'))
-  call feedkeys("A\<S-Up>\<esc>", 'tnix')
+  call assert_nobeep('call feedkeys("A\<S-Up>\<esc>", "tnix")')
   call assert_equal([0, 10, 1, 0], getpos('.'))
-  call feedkeys("A\<S-Up>\<esc>", 'tnix')
+  call assert_beeps('call feedkeys("A\<S-Up>\<esc>", "tnix")')
   call assert_equal([0, 10, 11, 0], getpos('.'))
   set nostartofline
   call cursor(30, 11)
   norm! zt
-  call feedkeys("A\<PageUp>\<esc>", 'tnix')
+  call assert_nobeep('call feedkeys("A\<PageUp>\<esc>", "tnix")')
   call assert_equal([0, 29, 11, 0], getpos('.'))
-  call feedkeys("A\<PageUp>\<esc>", 'tnix')
+  call assert_nobeep('call feedkeys("A\<PageUp>\<esc>", "tnix")')
   call assert_equal([0, 21, 11, 0], getpos('.'))
-  call feedkeys("A\<PageUp>\<esc>", 'tnix')
+  call assert_nobeep('call feedkeys("A\<PageUp>\<esc>", "tnix")')
   call assert_equal([0, 13, 11, 0], getpos('.'))
-  call feedkeys("A\<PageUp>\<esc>", 'tnix')
+  call assert_nobeep('call feedkeys("A\<PageUp>\<esc>", "tnix")')
   call assert_equal([0, 10, 11, 0], getpos('.'))
-  call feedkeys("A\<PageUp>\<esc>", 'tnix')
+  call assert_beeps('call feedkeys("A\<PageUp>\<esc>", "tnix")')
   call assert_equal([0, 10, 11, 0], getpos('.'))
   call cursor(1, 1)
-  call feedkeys("A\<PageDown>\<esc>", 'tnix')
+  call assert_nobeep('call feedkeys("A\<PageDown>\<esc>", "tnix")')
   call assert_equal([0, 9, 11, 0], getpos('.'))
-  call feedkeys("A\<PageDown>\<esc>", 'tnix')
+  call assert_nobeep('call feedkeys("A\<PageDown>\<esc>", "tnix")')
   call assert_equal([0, 17, 11, 0], getpos('.'))
-  call feedkeys("A\<PageDown>\<esc>", 'tnix')
+  call assert_nobeep('call feedkeys("A\<PageDown>\<esc>", "tnix")')
   call assert_equal([0, 25, 11, 0], getpos('.'))
-  call feedkeys("A\<PageDown>\<esc>", 'tnix')
+  call assert_nobeep('call feedkeys("A\<PageDown>\<esc>", "tnix")')
   call assert_equal([0, 30, 11, 0], getpos('.'))
-  call feedkeys("A\<PageDown>\<esc>", 'tnix')
+  call assert_beeps('call feedkeys("A\<PageDown>\<esc>", "tnix")')
   call assert_equal([0, 30, 11, 0], getpos('.'))
   " <S-Up> is the same as <PageUp>
   " <S-Down> is the same as <PageDown>
   call cursor(30, 11)
   norm! zt
-  call feedkeys("A\<S-Up>\<esc>", 'tnix')
+  call assert_nobeep('call feedkeys("A\<S-Up>\<esc>", "tnix")')
   call assert_equal([0, 29, 11, 0], getpos('.'))
-  call feedkeys("A\<S-Up>\<esc>", 'tnix')
+  call assert_nobeep('call feedkeys("A\<S-Up>\<esc>", "tnix")')
   call assert_equal([0, 21, 11, 0], getpos('.'))
-  call feedkeys("A\<S-Up>\<esc>", 'tnix')
+  call assert_nobeep('call feedkeys("A\<S-Up>\<esc>", "tnix")')
   call assert_equal([0, 13, 11, 0], getpos('.'))
-  call feedkeys("A\<S-Up>\<esc>", 'tnix')
+  call assert_nobeep('call feedkeys("A\<S-Up>\<esc>", "tnix")')
   call assert_equal([0, 10, 11, 0], getpos('.'))
-  call feedkeys("A\<S-Up>\<esc>", 'tnix')
+  call assert_beeps('call feedkeys("A\<S-Up>\<esc>", "tnix")')
   call assert_equal([0, 10, 11, 0], getpos('.'))
   call cursor(1, 1)
-  call feedkeys("A\<S-Down>\<esc>", 'tnix')
+  call assert_nobeep('call feedkeys("A\<S-Down>\<esc>", "tnix")')
   call assert_equal([0, 9, 11, 0], getpos('.'))
-  call feedkeys("A\<S-Down>\<esc>", 'tnix')
+  call assert_nobeep('call feedkeys("A\<S-Down>\<esc>", "tnix")')
   call assert_equal([0, 17, 11, 0], getpos('.'))
-  call feedkeys("A\<S-Down>\<esc>", 'tnix')
+  call assert_nobeep('call feedkeys("A\<S-Down>\<esc>", "tnix")')
   call assert_equal([0, 25, 11, 0], getpos('.'))
-  call feedkeys("A\<S-Down>\<esc>", 'tnix')
+  call assert_nobeep('call feedkeys("A\<S-Down>\<esc>", "tnix")')
   call assert_equal([0, 30, 11, 0], getpos('.'))
-  call feedkeys("A\<S-Down>\<esc>", 'tnix')
+  call assert_beeps('call feedkeys("A\<S-Down>\<esc>", "tnix")')
   call assert_equal([0, 30, 11, 0], getpos('.'))
   bw!
 endfunc
@@ -1757,7 +1780,61 @@ func Test_edit_startinsert()
   call feedkeys(":startinsert!\<CR>\<C-U>\<Esc>", 'xt')
   call assert_equal('', getline(1))
 
+  call setline(1, 'foobar')
+  setl nomodifiable
+  call assert_fails('startinsert', 'E21:')
+
+  call cursor(1, 1)
+  call assert_fails('startinsert!', 'E21:')
+  call assert_equal(1, col('.'))
+
   set backspace&
+  bwipe!
+endfunc
+
+" ":startinsert" is ineffective in a terminal window: it must not give an
+" error and with "!" it must not move the cursor.
+func Test_edit_startinsert_in_terminal()
+  CheckFeature terminal
+
+  let buf = Run_shell_in_terminal({})
+
+  " Fill the terminal with text.
+  if has('win32')
+    call feedkeys("dir\<CR>", 'xt')
+  else
+    call feedkeys("ls\<CR>", 'xt')
+  endif
+  call WaitForAssert({-> assert_notequal('', term_getline(buf, 1))})
+
+  " Go to Terminal-Normal mode and put the cursor on a line with text.
+  call feedkeys("\<C-W>N", 'xt')
+  call assert_notequal(0, search('\S', 'w'))
+  call cursor(line('.'), 1)
+
+  startinsert
+  startinsert!
+  call assert_equal(1, col('.'))
+
+  " Clear "restart_edit" in case the commands were not ignored.
+  stopinsert
+
+  call feedkeys("i", 'xt')
+  call StopShellInTerminal(buf)
+  bwipe!
+endfunc
+
+" Backspacing in Virtual Replace mode over a wide character that replaced
+" several narrower ones must not eat the padding that follows.
+func Test_edit_vreplace_bs_multibyte()
+  new
+  call setline(1, 'aé    xyz')
+  call feedkeys("gR\u4e00\<BS>\e", 'xt')
+  call assert_equal('aé    xyz', getline(1))
+
+  call setline(1, 'a€  xyz')
+  call feedkeys("gR\u4e00\<BS>\e", 'xt')
+  call assert_equal('a€  xyz', getline(1))
   bwipe!
 endfunc
 
@@ -1774,6 +1851,19 @@ func Test_edit_startreplace()
   call assert_equal("axyz\tb", getline(1))
   call feedkeys("0i\<C-R>=execute('startreplace')\<CR>12\e", 'xt')
   call assert_equal("12axyz\tb", getline(1))
+
+  call setline(1, 'abc')
+  setl nomodifiable
+  call assert_fails('startreplace', 'E21:')
+  call assert_fails('startgreplace', 'E21:')
+
+  call cursor(1, 1)
+  call assert_fails('startreplace!', 'E21:')
+  call assert_equal(1, col('.'))
+  call cursor(1, 1)
+  call assert_fails('startgreplace!', 'E21:')
+  call assert_equal(1, col('.'))
+
   bw!
 endfunc
 
@@ -2057,12 +2147,14 @@ endfunc
 
 " Test for positioning cursor after CTRL-R expression failed
 func Test_edit_ctrl_r_failed()
+  CheckScreendump
   CheckRunVimInTerminal
 
   let buf = RunVimInTerminal('', #{rows: 6, cols: 60})
 
   " trying to insert a blob produces an error
   call term_sendkeys(buf, "i\<C-R>=0z\<CR>")
+  call WaitForAssert({-> assert_match('^E976:', term_getline(buf, 5))}, 1000)
 
   " ending Insert mode should put the cursor back on the ':'
   call term_sendkeys(buf, ":\<Esc>")
@@ -2123,7 +2215,7 @@ endfunc
 func Test_read_invalid()
   " set encoding=latin1
   " This was not properly checking for going past the end.
-  call assert_fails('r`=', 'E484')
+  call assert_fails('r`=', 'E484:')
   set encoding=utf-8
 endfunc
 
@@ -2448,6 +2540,62 @@ func Test_edit_CAR_with_completion()
 
   set cot&
   bw!
+endfunc
+
+func Test_autoindent_no_strip_after_cmd_setline()
+  new
+  setlocal autoindent
+  inoremap <buffer> <F2> <Cmd>call setline('.', 'v  v')<CR><Cmd>call cursor(line('.'), 2)<CR>
+  call feedkeys("Go\<F2>\<Esc>", 'tx')
+  call assert_equal('v  v', getline(2))
+  bwipe!
+endfunc
+
+func Test_autoindent_no_strip_after_cursorholdi()
+  CheckFeature timers
+  new
+  setlocal autoindent
+  set updatetime=50
+  au CursorHoldI <buffer> call setline('.', 'v v')
+  call setline(1, ' x')
+  call cursor(1, 2)
+  call timer_start(120, {-> feedkeys("\<Esc>", 't')})
+  call feedkeys("o", 'tx!')
+  call assert_equal('v v', getline(2))
+  set updatetime&
+  bwipe!
+endfunc
+
+" Issue #20130: '[ must mark the start of the paste after CTRL-R CTRL-P + edit.
+func Test_open_square_mark_after_ctrl_r_ctrl_p_paste()
+  new
+  call setline(1, ['a', 'b', 'c', 'd'])
+  call cursor(4, 1)
+
+  call feedkeys("Vggyjo\<C-r>\<C-p>\"\<BS>\<Esc>", 'xt')
+
+  call assert_equal(['a', 'b', 'a', 'b', 'c', 'd', 'c', 'd'],
+        \ getline(1, '$'))
+  call assert_equal([0, 3, 1, 0], getpos("'["))
+  bwipe!
+endfunc
+
+func Test_autoindent_no_strip_cross_line()
+  new
+  setlocal autoindent
+  inoremap <buffer> <F3> {}<Left><CR><Cmd>normal! ==<CR><Up><End><CR>
+
+  call setline(1, '')
+  call feedkeys("i\<F3>\<Esc>", 'tx')
+
+  call assert_equal('{', getline(1))
+  call assert_equal('', getline(2))
+  call assert_equal('}', getline(3))
+  call assert_equal([0, 2, 1, 0], getpos('.'))
+
+  " Overwrite @. register with simple content to avoid affecting later tests.
+  call feedkeys("Go\<Esc>", 'tnix')
+  bwipe!
 endfunc
 
 " vim: shiftwidth=2 sts=2 expandtab

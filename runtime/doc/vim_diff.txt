@@ -75,6 +75,7 @@ Defaults                                            *defaults* *nvim-defaults*
 - 'nrformats' defaults to "bin,hex"
 - 'path' defaults to ".,,". The C ftplugin adds "/usr/include" if it exists.
 - 'sessionoptions' includes "unix,slash", excludes "options"
+- 'shelltemp' is disabled
 - 'shortmess' includes "CF", excludes "S"
 - 'sidescroll' defaults to 1
 - 'smarttab' is enabled
@@ -87,16 +88,22 @@ Defaults                                            *defaults* *nvim-defaults*
   host terminal
 - 'ttimeout' is enabled
 - 'ttimeoutlen' defaults to 50
-- 'ttyfast' is always set
+- 'ttyfast' is set by default, but it can be unset during startup by setting
+  the environment variable `NVIM_NOTTYFAST` to adjust the startup sequence for
+  slow environments (such as ssh).
 - 'undodir' defaults to ~/.local/state/nvim/undo// (|xdg|), auto-created
 - 'viewoptions' includes "unix,slash", excludes "options"
 - 'viminfo' includes "!"
 - 'wildoptions' defaults to "pum,tagfile"
 
+- |dir| plugin is enabled, so editing a directory shows its contents in a
+  buffer with 'filetype' set to "directory".
 - |editorconfig| plugin is enabled, .editorconfig settings are applied.
 - |man.lua| plugin is enabled, so |:Man| is available by default.
 - |matchit| plugin is enabled. To disable it in your config: >vim
     :let loaded_matchit = 1
+- |package-spellfile| plugin is enabled, spellfiles are installed by default
+  if missing.
 
 - |g:vimsyn_embed| defaults to "l" to enable Lua highlighting
 
@@ -142,7 +149,7 @@ you never want any default mappings, call |:mapclear| early in your config.
 - <C-W> |i_CTRL-W-default|
 - <C-L> |CTRL-L-default|
 - & |&-default|
-- Q |v_Q-default|
+- - |dir-mappings|
 - @ |v_@-default|
 - # |v_#-default|
 - * |v_star-default|
@@ -154,18 +161,20 @@ you never want any default mappings, call |:mapclear| early in your config.
 - [D |[D-default|
 - ]D |]D-default|
 - <C-W>d |CTRL-W_d-default|
-- |[q| |]q| |[Q| |]Q| |[CTRL-Q| |]CTRL-Q|
-- |[l| |]l| |[L| |]L| |[CTRL-L| |]CTRL-L|
-- |[t| |]t| |[T| |]T| |[CTRL-T| |]CTRL-T|
+- |[q| |]q| |[Q| |]Q| |[_CTRL-Q| |]_CTRL-Q|
+- |[l| |]l| |[L| |]L| |[_CTRL-L| |]_CTRL-L|
+- |[t| |]t| |[T| |]T| |[_CTRL-T| |]_CTRL-T|
 - |[a| |]a| |[A| |]A|
 - |[b| |]b| |[B| |]B|
 - |[<Space>| |]<Space>|
 - LSP defaults |lsp-defaults|
   - K |K-lsp-default|
-  - |v_an| |v_in|
   - gr prefix |gr-default|
     - |gra| |gri| |grn| |grr| |grt|
   - <C-S> |i_CTRL-S|
+- Treesitter defaults |treesitter-defaults|
+  - |v_an| |v_in|
+  - |v_]n| |v_[n|
 
 DEFAULT AUTOCOMMANDS
                                                         *default-autocmds*
@@ -176,6 +185,7 @@ nvim.terminal:
 - BufReadCmd: Treats "term://" buffers as |terminal| buffers. |terminal-start|
 - TermClose: A |terminal| buffer started with no arguments (which thus uses
   'shell') and which exits with no error is closed automatically.
+- TermClose: Displays the "[Process exited]" virtual text.
 - TermRequest: The terminal emulator responds to OSC background and foreground
   requests, indicating (1) a black background and white foreground when Nvim
   option 'background' is "dark" or (2) a white background and black foreground
@@ -221,9 +231,11 @@ New Features                                                   *nvim-features*
 MAJOR COMPONENTS
 
 - API                             |API|
+- Command atoms                   |CmdAtom|
 - Job control                     |job-control|
 - LSP framework                   |lsp|
-- Lua scripting                   |lua|
+- Lua scripting                   |lua| |-l|
+- Multicursor                     |multicursor|
 - Parsing engine                  |treesitter|
 - Plugin manager                  |vim.pack|
 - Providers
@@ -231,6 +243,7 @@ MAJOR COMPONENTS
   - Node.js plugins               |provider-nodejs|
   - Python plugins                |provider-python|
   - Ruby plugins                  |provider-ruby|
+- Remote                          |--remote-ui| |:connect| |:detach|
 - Remote plugins                  |remote-plugin|
 - Shared data                     |shada|
 - Terminal emulator               |terminal|
@@ -274,8 +287,7 @@ ARCHITECTURE
 
 The Nvim UI is "decoupled" from the core editor: all UIs, including the
 builtin |TUI| are just plugins that connect to a Nvim server (via |--server|
-or |--embed|). Multiple Nvim UI clients can connect to the same Nvim editor
-server.
+or |--embed|). Multiple UI clients can |:connect| to the same editor server.
 
 External plugins run in separate processes. |remote-plugin| This improves
 stability and allows those plugins to work without blocking the editor. Even
@@ -284,7 +296,7 @@ stability and allows those plugins to work without blocking the editor. Even
 
 Platform and I/O facilities are built upon libuv. Nvim benefits from libuv
 features and bug fixes, and other projects benefit from improvements to libuv
-by Nvim developers.
+by Nvim developers. This enables features such as |vim.wait()| and |vim.uv|.
 
 FEATURES
 
@@ -296,8 +308,12 @@ Command-line:
 - (Experimental) *g:Nvim_color_cmdline* Command-line (|:|) is colored by
   callback defined in `g:Nvim_color_cmdline` (this callback is for testing
   only, and will be removed in the future).
+- |cmdwin| (|q:|, |q/|, |q?|, |c_CTRL-F|) is a "normal" buffer+window, instead
+  of a nested modal loop. API and Lua callbacks can run while it is open. The
+  |cmdwin-char| is shown via 'statuscolumn'.
 
 Commands:
+- |:bcd|
 - |:checkhealth|
 - |:connect|
 - |:detach|
@@ -305,16 +321,26 @@ Commands:
 - |:EditQuery|
 - |:Inspect|
 - |:InspectTree|
+- |:log|
+- |:lsp|
 - |:Man| is available by default, with many improvements such as completion
 - |:match| can be invoked before highlight group is defined
+- |:packdel|
+- |:packupdate|
 - |:restart|
 - |:source| works with Lua
 - |:trust|
 - User commands can support |:command-preview| to show results as you type
 - |:write| with "++p" flag creates parent directories.
 - |:update| command writes new file buffers even when unmodified.
+- |:uptime|
 
 Editor:
+- |ins-repeat| replays the full Insert session, including cursor-moves:
+  "iab<Left>c<Esc>." produces "acb", not "c".
+- |visual-repeat| is "semantic" instead of "fixed-size". If you prefer Vim's
+  "fixed-size" Visual-repeat, see |visual-fixed-size|.
+- Interactive |Ex-mode| is implemented as persistent, insert-mode |cmdwin|.
 - |prompt-buffer| supports multiline input/paste, undo/redo, and o/O normal
   commands.
 - |i_CTRL-R| inserts named/clipboard registers (A-Z,a-z,0-9+) literally, like
@@ -323,12 +349,16 @@ Editor:
 
 Events (autocommands):
 - Fixed inconsistent behavior in execution of nested autocommands #23368
-- |BufModifiedSet|
+- |InsertCharPre| is not triggered for stuffed text (|.| redo, |i_CTRL-R|,
+  |i_CTRL-A|), which also skips mappings and abbreviations.
+- |OptionSet| is triggered for 'modified' when writing a file, undoing changes,
+  or using |:set| modified.
 - |Progress|
 - |RecordingEnter|
 - |RecordingLeave|
 - |SearchWrapped|
 - |Signal|
+- |TabMoved|
 - |TabNewEntered|
 - |TermClose|
 - |TermOpen|
@@ -349,6 +379,7 @@ Functions:
 - |tempname()| tries to recover if the Nvim |tempdir| disappears.
 - |writefile()| with "p" flag creates parent directories.
 - |prompt_getinput()|
+- |prompt_appendbuf()|
 
 Highlight groups:
 - |highlight-blend| controls blend level for a highlight group
@@ -378,7 +409,13 @@ Input/Mappings:
 
 Normal commands:
 - |gO| shows a filetype-defined "outline" of the current buffer.
-- |Q| replays the last recorded macro instead of switching to Ex mode (|gQ|).
+- |gQ| restores |multicursor|s.
+- |Q| adds a |multicursor| ([count]Q: at each match; {Visual}Q: at each
+  selected line |v_Q|) instead of switching to Ex mode.
+- [count]q: enters |Ex-mode|.
+- |ZR| performs |:restart|
+- |v_al| selects the whole buffer; |v_il| selects the current line without
+  leading or trailing white space.
 
 Options:
 
@@ -387,6 +424,8 @@ Options:
 - 'ambiwidth'   cannot be set to empty.
 - 'autoread'    works in the terminal (if it supports "focus" events)
 - 'background'  cannot be set to empty.
+- 'completeopt' flag "preselect" selects first completion item that has the
+                "preselect" attribute set.
 - 'cpoptions'   flags: |cpo-_|
 - 'eadirection' cannot be set to empty.
 - 'exrc'        searches for ".nvim.lua", ".nvimrc", or ".exrc" files. The
@@ -399,9 +438,10 @@ Options:
 - 'inccommand'  shows interactive results for |:substitute|-like commands
                 and |:command-preview| commands
 - 'jumpoptions'
-    - "view" tries to restore |mark-view| when moving through the jumplist.
+    - "view" tries to restore |mark-view| when moving through the |jumplist|,
+      |changelist|, |alternate-file|, and |mark-motions|.
     - "clean" removes unloaded buffers from the jumplist.
-- the |jumplist|, |changelist|, |alternate-file| or using |mark-motions|.
+- 'langmap'     supports multibyte chars.
 - 'laststatus'  global statusline support
 - 'mousemodel'  cannot be set to empty.
 - 'mousescroll' amount to scroll by when scrolling with a mouse
@@ -413,7 +453,8 @@ Options:
 - 'showcmdloc'  cannot be set to empty.
 - 'signcolumn'  can show multiple signs (dynamic or fixed columns)
 - 'statuscolumn' full control of columns using 'statusline' format
-- 'statusline' default is exposed as a statusline expression.
+- 'statusline'  default is exposed as a statusline expression.
+- 'statusline'  and related options apply `%=` and `%<` to item groups.
 - 'splitkeep'   cannot be set to empty.
 - 'tabline'     middle-click on tabpage label closes tabpage,
                 and %@Func@foo%X can call any function on mouse-click
@@ -422,6 +463,8 @@ Options:
 - 'winblend'    pseudo-transparency in floating windows |api-floatwin|
 - 'winhighlight' window-local highlights
 - 'busy' busy status for buffers
+- 'messagesopt' added progress:c to control if progress messages are shown in
+  cmdline
 
 Performance:
 - Signs are implemented using Nvim's internal "marktree" (btree) structure.
@@ -451,10 +494,11 @@ Signs:
 Startup:
 - |-e| and |-es| invoke the same "improved Ex mode" as -E and -Es.
 - |-E| and |-Es| read stdin as text (into buffer 1).
-- |-es| and |-Es| have improved behavior:
-    - Quits automatically, don't need "-c qa!".
+- |-es| and |-Es| act as a generic "script mode":
+    - Exits automatically, don't need "-c qa!".
     - Skips swap-file dialog.
-    - Optimized for non-interactive scripts: disables swapfile, shada.
+    - Disables swapfile, shada.
+    - Various "POSIX Ex" quirks were dropped.
 - |-l| Executes Lua scripts non-interactively.
 - |-s| reads Normal commands from stdin if the script name is "-".
 - Reading text (instead of commands) from stdin |--|:
@@ -473,8 +517,9 @@ TUI:
   - Note: If you want to detect when Nvim is running in a terminal, use
     `has('gui_running')` |has()| or see |nvim_list_uis()| for an example of
     how to inspect the UI channel.
-- "builtin_x" means one of the |builtin-terms| was chosen, because the expected
-  terminfo file was not found on the system.
+- Nvim might optionally be compiled with unibilium, in which case the terminfo
+  database will be used. Otherwise, or if the terminal was not found in
+  the database, a table of builtin terminal definitions will be used.
 - Nvim will use 256-colour capability on Linux virtual terminals.  Vim uses
   only 8 colours plus bright foreground on Linux VTs.
 - Vim combines what is in its |builtin-terms| with what it reads from terminfo,
@@ -640,6 +685,12 @@ Mappings:
 - "#" followed by a digit doesn't stand for a function key at the start of the
   lhs of a mapping.
 
+Marks:
+- |undo| does not restore a mark that you moved (|m|, |:mark|) after the change
+  being undone; the mark shifts with the text it was moved to, the same as a
+  mark the change never touched. Vim restores its old (wrong) position. Marks
+  moved by the change itself are still restored.
+
 Motion:
 - The |jumplist| avoids useless/phantom jumps.
 
@@ -660,8 +711,8 @@ Vimscript compatibility:
 Working directory (Vim implemented some of these after Nvim):
 - |DirChanged| and |DirChangedPre| can be triggered when switching to another
   window or tab.
-- |getcwd()| and |haslocaldir()| may throw errors if the tab page or window
-  cannot be found.  *E5000* *E5001* *E5002*
+- |getcwd()| and |haslocaldir()| may throw errors if the tabpage, window, or
+  buffer cannot be found.
 - |haslocaldir()| checks for tab-local directory if and only if -1 is passed as
   window number, and its only possible returns values are 0 and 1.
 - `getcwd(-1)` is equivalent to `getcwd(-1, 0)` instead of returning the global
@@ -682,14 +733,12 @@ Missing features                                         *nvim-missing*
 These legacy Vim features are not yet implemented:
 
 - *:gui*
-- *:gvim*
 - *'browsedir'* *'bsdir'*
 - *'completepopup'*
 - *'guioptions'* *'go'*
 - *'guitablabel'* *'gtl'*
 - *'guitabtooltip'* *'gtt'*
 - *'mouseshape'* *'mouses'*
-- *'previewpopup'*
 
 ==============================================================================
 Removed legacy features                                  *nvim-removed*
@@ -713,6 +762,7 @@ Aliases:
 Commands:
 - :behave
 - :fixdel
+- *:gvim*
 - *hardcopy* `:hardcopy` was removed. Instead, use `:TOhtml` and print the
   resulting HTML using a web browser or other HTML viewer.
 - :helpfind
@@ -737,9 +787,11 @@ Compile-time features:
 - X11 integration (see |x11-selection|)
 
 Editor:
+- |c_CTRL-F| cannot enter |cmdwin| from the |expr-register| prompt.
 - *cscope* support was removed in favour of plugin-based solutions such as:
   https://github.com/dhananjaylatkar/cscope_maps.nvim
 - *popup-window* : Use |floating-windows| instead.
+- *spellfile.vim* : Replaced by |package-spellfile|.
 - *textprop* : Use |extmarks| instead.
 
 Eval:
@@ -748,13 +800,15 @@ Eval:
 - *err_teapot()*
 - *js_encode()*
 - *js_decode()*
+- *listener_add()* , etc: use |api-buffer-updates-lua| instead.
+- *redraw_listener_add()* , etc:  use |nvim_set_decoration_provider()| instead.
 - *v:none* (used by Vim to represent JavaScript "undefined"); use |v:null| instead.
 - *v:sizeofint*
 - *v:sizeoflong*
 - *v:sizeofpointer*
 
 Events:
-- *SafeStateAgain*
+- SafeStateAgain
 - *SigUSR1* Use |Signal| to detect `SIGUSR1` signal instead.
 
 Options:
@@ -858,7 +912,6 @@ Options:
 - *'toolbar'* *'tb'*
 - *'toolbariconsize'* *'tbis'*
 - *'ttybuiltin'* *'tbi'* *'nottybuiltin'* *'notbi'*
-- *'ttyfast'* *'tf'* *'nottyfast'* *'notf'*
 - *'ttymouse'* *'ttym'*
 - *'ttyscroll'* *'tsl'*
 - *'ttytype'* *'tty'*
@@ -884,6 +937,8 @@ Providers:
 Startup:
 - `--literal`: File args are always literal; to expand wildcards on Windows,
   use |:n| e.g. `nvim +"n *"`
+- *--serverlist* Use instead: `nvim -es -V1 +'echo serverlist()'`
+- *--servername* Use instead: |--server| or |:connect|.
 - Easy mode: eview, evim, nvim -y
 - Restricted mode: rview, rvim, nvim -Z
 - Vi mode: nvim -v
@@ -917,7 +972,8 @@ TUI:
                           *t_xx* *termcap-options* *t_AB* *t_Sb* *t_vb* *t_SI*
 - Nvim does not have special `t_XX` options nor <t_XX> keycodes to configure
   terminal capabilities. Instead Nvim treats the terminal as any other UI,
-  e.g. 'guicursor' sets the terminal cursor style if possible.
+  e.g. 'guicursor' sets the terminal cursor style if possible. You can use
+  |$NVIM_TERMDEFS| if you still need to override the builtin definitions.
 
                           *termcap*
 - Nvim never uses the termcap database, only |terminfo| and |builtin-terms|.

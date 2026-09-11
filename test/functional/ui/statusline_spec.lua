@@ -1,7 +1,9 @@
 local t = require('test.testutil')
 local n = require('test.functional.testnvim')()
+local tt = require('test.functional.testterm')
 local Screen = require('test.functional.ui.screen')
 
+local describe, it, before_each = t.describe, t.it, t.before_each
 local assert_alive = n.assert_alive
 local clear = n.clear
 local command = n.command
@@ -14,6 +16,8 @@ local exec_lua = n.exec_lua
 local eval = n.eval
 local sleep = vim.uv.sleep
 local pcall_err = t.pcall_err
+local testprg = n.testprg
+local expect_exitcode = tt.expect_exitcode
 
 local mousemodels = { 'extend', 'popup', 'popup_setpos' }
 
@@ -97,6 +101,47 @@ for _, model in ipairs(mousemodels) do
       eq('0 1 r', eval('g:testvar'))
       api.nvim_input_mouse('left', 'press', '', 0, 6, 7)
       eq('0 1 l', eval('g:testvar'))
+    end)
+
+    it('works with combined highlight attributes', function()
+      screen:add_extra_attr_ids({
+        [131] = { reverse = true, bold = true, background = Screen.colors.LightMagenta },
+        [132] = {
+          reverse = true,
+          foreground = Screen.colors.Magenta,
+          bold = true,
+          background = Screen.colors.LightMagenta,
+        },
+        [133] = { reverse = true, bold = true, foreground = Screen.colors.Magenta1 },
+        [134] = {
+          bold = true,
+          background = Screen.colors.LightMagenta,
+          reverse = true,
+          undercurl = true,
+          special = Screen.colors.Red,
+        },
+        [135] = {
+          bold = true,
+          background = Screen.colors.LightMagenta,
+          reverse = true,
+          undercurl = true,
+          foreground = Screen.colors.Fuchsia,
+          special = Screen.colors.Red,
+        },
+      })
+
+      api.nvim_set_option_value(
+        'statusline',
+        '\t%#Pmenu#foo%$SpellBad$bar%$String$baz%#Constant#qux',
+        {}
+      )
+
+      screen:expect([[
+        ^                                        |
+        {1:~                                       }|*5
+        {3:^I}{131:foo}{134:bar}{135:baz}{133:qux                          }|
+                                                |
+      ]])
     end)
 
     it('works for winbar', function()
@@ -301,7 +346,7 @@ describe('global statusline', function()
     screen:expect([[
       ^                                                            |
       {1:~                                                           }|*14
-                                                0,0-1         All |
+                                                0,0-1          All|
     ]])
 
     command('set laststatus=3')
@@ -357,7 +402,7 @@ describe('global statusline', function()
       {2:< 0,0-1          All <-1          All <}│{1:~                   }|
                                              │{1:~                   }|
       {1:~                                      }│{1:~                   }|*4
-                                                0,0-1         All |
+                                                0,0-1          All|
     ]])
 
     command('set laststatus=3')
@@ -373,6 +418,24 @@ describe('global statusline', function()
                                              │{1:~                   }|
       {1:~                                      }│{1:~                   }|*3
       {3:[No Name]                                 0,0-1          All}|
+                                                                  |
+    ]])
+  end)
+
+  it('leaving laststatus=3 does not push a window past the last row', function()
+    command('split | wincmd j | vsplit | split')
+    command('wincmd t')
+    command('resize 1000')
+    command('set laststatus=2')
+    command('resize 1000')
+    screen:expect([[
+      ^                                                            |
+      {1:~                                                           }|*9
+      {3:[No Name]                                 0,0-1          All}|
+                                    │                             |
+      {2:[No Name]   0,0-1          All}│{1:~                            }|
+                                    │{1:~                            }|
+      {2:[No Name]   0,0-1          All [No Name]  0,0-1          All}|
                                                                   |
     ]])
   end)
@@ -483,6 +546,72 @@ describe('global statusline', function()
       0006;<control>;Cc;0;BN;;;;;N;ACKNOWLEDGE;;;;                |
       ^0007;<control>;Cc;0;BN;;;;;N;BELL;;;;                       |
       {3:test/functional/fixtures/bigfile.txt      8,1             0%}|
+                                                                  |
+    ]])
+  end)
+
+  it('vertical separator connector is not lost when switching window', function()
+    screen:add_extra_attr_ids {
+      [101] = { background = tonumber('0x282828') },
+      [102] = { bold = true, background = tonumber('0x282828'), foreground = Screen.colors.Blue1 },
+    }
+    command('hi NormalNC guibg=#282828')
+    command('vsplit | wincmd l | split')
+    -- Cursor is in top-right. Move to bottom-right.
+    feed('<C-w>j')
+    -- Verify the ├ connector is present.
+    screen:expect([[
+      {101:                              }│{101:                             }|
+      {102:~                             }│{102:~                            }|*6
+      {102:~                             }├─────────────────────────────|
+      {102:~                             }│^                             |
+      {102:~                             }│{1:~                            }|*5
+      {3:[No Name]                                 0,0-1          All}|
+                                                                  |
+    ]])
+    -- Navigate from bottom-right to left.
+    feed('<C-w>h')
+    -- The ├ connector must still be present.
+    screen:expect([[
+      ^                              │{101:                             }|
+      {1:~                             }│{102:~                            }|*6
+      {1:~                             }├─────────────────────────────|
+      {1:~                             }│{101:                             }|
+      {1:~                             }│{102:~                            }|*5
+      {3:[No Name]                                 0,0-1          All}|
+                                                                  |
+    ]])
+  end)
+
+  it('horizontal separator connector is not lost when switching window', function()
+    screen:add_extra_attr_ids {
+      [101] = { background = tonumber('0x282828') },
+      [102] = { bold = true, background = tonumber('0x282828'), foreground = Screen.colors.Blue1 },
+    }
+    command('hi NormalNC guibg=#282828')
+    command('split | wincmd j | vsplit')
+    -- Cursor is in bottom-left. Move to bottom-right.
+    feed('<C-w>l')
+    -- Verify the ┬ connector is present.
+    screen:expect([[
+      {101:                                                            }|
+      {102:~                                                           }|*6
+      ──────────────────────────────┬─────────────────────────────|
+      {101:                              }│^                             |
+      {102:~                             }│{1:~                            }|*5
+      {3:[No Name]                                 0,0-1          All}|
+                                                                  |
+    ]])
+    -- Navigate from bottom-right to top.
+    feed('<C-w>k')
+    -- The ┬ connector must still be present.
+    screen:expect([[
+      ^                                                            |
+      {1:~                                                           }|*6
+      ──────────────────────────────┬─────────────────────────────|
+      {101:                              }│{101:                             }|
+      {102:~                             }│{102:~                            }|*5
+      {3:[No Name]                                 0,0-1          All}|
                                                                   |
     ]])
   end)
@@ -695,6 +824,27 @@ describe('statusline', function()
     ]])
   end)
 
+  it('ruler is cleared when window without statusline is closed', function()
+    local cfg = { relative = 'editor', row = 1, col = 1, height = 1, width = 1 }
+    local win = api.nvim_open_win(0, true, cfg)
+    -- Last line ruler does not take on window-local highlights #38777
+    command('hi link MsgArea Normal | setlocal winhl=Normal:Statement | set ruler laststatus=2')
+    screen:expect([[
+                                              |
+      {1:~}{15:^ }{1:                                      }|
+      {1:~                                       }|*4
+      {2:[No Name]             0,0-1          All}|
+                            0,0-1          All|
+    ]])
+    api.nvim_win_close(win, true)
+    screen:expect([[
+      ^                                        |
+      {1:~                                       }|*5
+      {3:[No Name]             0,0-1          All}|
+                                              |
+    ]])
+  end)
+
   it('hidden moves ruler to cmdline', function()
     -- Use long ruler to check 'ruler' with 'rulerformat' set has correct width.
     command [[
@@ -802,6 +952,178 @@ describe('statusline', function()
                                               |
     ]])
   end)
+
+  it('truncation inside nested nvim_eval_statusline does not crash #36616', function()
+    exec_lua(function()
+      function _G.statusline_truncating()
+        local win = vim.api.nvim_get_current_win()
+        local res = vim.api.nvim_eval_statusline('%f', { winid = win, maxwidth = 5 })
+        return res.str
+      end
+      vim.o.laststatus = 2
+      vim.o.statusline = '%#Special#B:%{%v:lua.statusline_truncating()%}'
+    end)
+    local truncated = exec_lua(function()
+      return vim.api.nvim_eval_statusline('%f', { maxwidth = 5 }).str
+    end)
+    local rendered = exec_lua(function()
+      return vim.api.nvim_eval_statusline(
+        vim.o.statusline,
+        { winid = vim.api.nvim_get_current_win() }
+      ).str
+    end)
+    eq('B:' .. truncated, rendered)
+  end)
+
+  it('truncation inside nested nvim_eval_statusline correctly adjusts highlights', function()
+    exec_lua('vim.o.laststatus = 2')
+    exec_lua([[vim.o.statusline = "%{%repeat('%#Error#',20)%}"]])
+    exec_lua([[
+      vim.o.statusline = "%l%l%l%l%{%nvim_eval_statusline('test%#Error#%l%<',{'maxwidth':4,'highlights':1}).highlights%}"
+    ]])
+    screen:expect([[
+      ^                                        |
+      {1:~                                       }|*5
+      {3:< 'groups': ['StatusLine'], 'start': 0}]}|
+                                              |
+    ]])
+  end)
+
+  it('no cmdline ruler for autocmd window #39938', function()
+    command('set ruler laststatus=2')
+    api.nvim_create_autocmd('BufDelete', { command = 'redrawstatus' })
+    screen:expect([[
+      ^                                        |
+      {1:~                                       }|*5
+      {3:[No Name]             0,0-1          All}|
+                                              |
+    ]])
+    api.nvim_exec_autocmds('BufDelete', { buf = api.nvim_create_buf(true, true) })
+    screen:expect_unchanged(true)
+  end)
+
+  it('active window is correct after nvim_exec_autocmds({buf}) #40153', function()
+    command('set laststatus=2')
+    local caller_win = api.nvim_get_current_win()
+    command('split')
+    local target = api.nvim_create_buf(true, false)
+    api.nvim_set_current_buf(target)
+    api.nvim_set_current_win(caller_win)
+    exec_lua(function(buf)
+      _G.in_aucmd_statusline = false
+      _G.statusline_contexts = {}
+      _G.Status = function()
+        local current = vim.api.nvim_get_current_win()
+        local statusline = vim.g.statusline_winid
+        local focus = current == statusline
+        table.insert(_G.statusline_contexts, {
+          current = current,
+          focus = focus,
+          in_aucmd = _G.in_aucmd_statusline,
+          statusline = statusline,
+        })
+        return focus and 'CUR' or 'nc'
+      end
+      vim.o.statusline = '%!v:lua.Status()'
+      vim.api.nvim_create_autocmd('User', {
+        buffer = buf,
+        callback = function(ev)
+          _G.in_aucmd_statusline = true
+          vim.api.nvim__redraw({ buf = ev.buf, statusline = true })
+          _G.in_aucmd_statusline = false
+        end,
+      })
+    end, target)
+    -- Ignore statusline evaluations from setup; only the autocmd redraw matters.
+    exec_lua('_G.statusline_contexts = {}')
+    api.nvim_exec_autocmds('User', { buf = target })
+    screen:expect([[
+                                              |
+      {1:~                                       }|*2
+      {2:nc                                      }|
+      ^                                        |
+      {1:~                                       }|
+      {3:CUR                                     }|
+                                              |
+    ]])
+    -- `%!` may evaluate during the callback, but must not see the target as focused.
+    eq(
+      {},
+      exec_lua(function(win)
+        return vim
+          .iter(_G.statusline_contexts)
+          :filter(function(context)
+            return context.in_aucmd and context.focus and context.current ~= win
+          end)
+          :totable()
+      end, caller_win)
+    )
+  end)
+
+  it('statusline evaluation during nvim_exec_autocmds({buf}) #40153', function()
+    command('set laststatus=2')
+    local caller_win = api.nvim_get_current_win()
+    command('split')
+    local target = api.nvim_create_buf(true, false)
+    api.nvim_set_current_buf(target)
+    api.nvim_set_current_win(caller_win)
+    exec_lua(function(buf)
+      _G.in_aucmd_statusline = false
+      _G.statusline_contexts = {}
+      _G.Status = function()
+        table.insert(_G.statusline_contexts, {
+          in_aucmd = _G.in_aucmd_statusline,
+          current = vim.api.nvim_get_current_win(),
+          actual = tonumber(vim.g.actual_curwin or -1),
+        })
+        return vim.api.nvim_get_current_win() == tonumber(vim.g.actual_curwin or -1) and 'CUR'
+          or 'nc'
+      end
+      -- `%{%...%}` sets g:actual_curwin while evaluating the statusline.
+      vim.o.statusline = '%{%v:lua.Status()%}'
+      vim.api.nvim_create_autocmd('User', {
+        buffer = buf,
+        callback = function(ev)
+          _G.in_aucmd_statusline = true
+          vim.api.nvim__redraw({ buf = ev.buf, statusline = true })
+          _G.in_aucmd_statusline = false
+        end,
+      })
+    end, target)
+    screen:expect([[
+                                              |
+      {1:~                                       }|*2
+      {2:nc                                      }|
+      ^                                        |
+      {1:~                                       }|
+      {3:CUR                                     }|
+                                              |
+    ]])
+    -- Ignore statusline evaluations from setup; only the autocmd redraw matters.
+    exec_lua('_G.statusline_contexts = {}')
+    api.nvim_exec_autocmds('User', { buf = target })
+    screen:expect({ unchanged = true })
+    local contexts = exec_lua(function()
+      return _G.statusline_contexts
+    end)
+    eq(true, #contexts > 0)
+    eq(caller_win, contexts[#contexts].actual)
+  end)
+
+  it('%P %L updates in other windows', function()
+    screen:try_resize(40, 14)
+    command('set laststatus=2 statusline=%P\\ %L | split')
+    feed(':put=range(10)<cr>dgg')
+    screen:expect([[
+      ^                                        |
+      {1:~                                       }|*5
+      {3:All 1                                   }|
+                                              |
+      {1:~                                       }|*4
+      {2:All 1                                   }|
+      --No lines in buffer--                  |
+    ]])
+  end)
 end)
 
 describe('default statusline', function()
@@ -812,6 +1134,7 @@ describe('default statusline', function()
     screen = Screen.new(60, 16)
     screen:add_extra_attr_ids {
       [100] = { foreground = Screen.colors.Magenta1, bold = true },
+      [131] = { foreground = Screen.colors.NvimDarkGreen },
     }
     command('set laststatus=2')
     command('set ruler')
@@ -820,27 +1143,57 @@ describe('default statusline', function()
   it('setting statusline to empty string sets default statusline', function()
     exec_lua("vim.o.statusline = 'asdf'")
     eq('asdf', eval('&statusline'))
+    screen:expect([[
+      ^                                                            |
+      {1:~                                                           }|*13
+      {3:asdf                                                        }|
+                                                                  |
+    ]])
 
     local default_statusline = table.concat({
       '%<',
-      '%f %h%w%m%r ',
-      '%=',
-      "%{% &showcmdloc == 'statusline' ? '%-10.S ' : '' %}",
-      "%{% exists('b:keymap_name') ? '<'..b:keymap_name..'> ' : '' %}",
-      "%{% &busy > 0 ? '◐ ' : '' %}",
-      "%(%{luaeval('(package.loaded[''vim.diagnostic''] and vim.diagnostic.status()) or '''' ')} %)",
-      "%{% &ruler ? ( &rulerformat == '' ? '%-14.(%l,%c%V%) %P' : &rulerformat ) : '' %}",
+      '%f',
+      "%( %h%w%m%r%{ v:lua.require('vim._core.util').term_exitcode() }%)",
+      '%= ',
+      '%(%-10S %)',
+      "%{ &busy > 0 ? '◐\226\128\175' : '' }",
+      "%(%{ luaeval('(package.loaded[''vim.ui''] and vim.api.nvim_get_current_win() == tonumber(vim.g.actual_curwin or -1) and vim.ui.progress_status()) or '''' ')} %)",
+      "%{% luaeval('(package.loaded[''vim.diagnostic''] and next(vim.diagnostic.count(0)) and vim.diagnostic.status() .. '' '') or '''' ') %}",
+      '%(%k %)',
+      "%{% &ruler ? &rulerformat : '' %}",
     })
 
     exec_lua("vim.o.statusline = ''")
-
     eq(default_statusline, eval('&statusline'))
-
     screen:expect([[
       ^                                                            |
       {1:~                                                           }|*13
       {3:[No Name]                                 0,0-1          All}|
                                                                   |
+    ]])
+
+    -- Reset to default (via the correct scope) if there's an error.
+    command('setglobal statusline=%{a%}')
+    eq(default_statusline, eval('&statusline'))
+    eq(default_statusline, eval('&g:statusline'))
+    eq('', eval('&l:statusline'))
+    command('redrawstatus') -- like Vim, statusline isn't immediately redrawn after an error
+    screen:expect([[
+      ^                                                            |
+      {1:~                                                           }|*13
+      {3:[No Name]                                 0,0-1          All}|
+      {9:E121: Undefined variable: a}                                 |
+    ]])
+    command('setlocal statusline=%{b%}')
+    eq(default_statusline, eval('&statusline'))
+    eq(default_statusline, eval('&g:statusline'))
+    eq('', eval('&l:statusline'))
+    command('redrawstatus') -- like Vim, statusline isn't immediately redrawn after an error
+    screen:expect([[
+      ^                                                            |
+      {1:~                                                           }|*13
+      {3:[No Name]                                 0,0-1          All}|
+      {9:E121: Undefined variable: b}                                 |
     ]])
   end)
 
@@ -857,7 +1210,7 @@ describe('default statusline', function()
     screen:expect([[
       ^                                                            |
       {1:~                                                           }|*13
-      {3:[No Name]                               ◐ 0,0-1          All}|
+      {3:[No Name]                               ◐ 0,0-1          All}|
                                                                   |
     ]])
 
@@ -867,6 +1220,325 @@ describe('default statusline', function()
       {1:~                                                           }|*13
       {3:[No Name]                                 0,0-1          All}|
                                                                   |
+    ]])
+  end)
+
+  it('shows exit code when terminal exits #14986', function()
+    exec_lua("vim.o.statusline = ''")
+    api.nvim_set_option_value('shell', testprg('shell-test'), {})
+    api.nvim_set_option_value('shellcmdflag', 'EXIT', {})
+    api.nvim_set_option_value('shellxquote', '', {}) -- win: avoid extra quotes
+    command('terminal 9')
+    screen:expect({ any = '%[Exit:\226\128\1759%]' })
+    expect_exitcode(9)
+  end)
+
+  it('shows and updates progress status', function()
+    exec_lua("vim.o.statusline = ''")
+    local function get_progress()
+      return exec_lua(function()
+        return vim.ui.progress_status()
+      end)
+    end
+
+    eq('', get_progress())
+    ---@type integer|string
+    local id1 = api.nvim_echo(
+      { { 'searching...' } },
+      true,
+      { kind = 'progress', source = 'tests', title = 'test', status = 'running', percent = 10 }
+    )
+    eq('10%(1)', get_progress())
+
+    api.nvim_echo({ { 'searching' } }, true, {
+      id = id1,
+      kind = 'progress',
+      source = 'tests',
+      percent = 50,
+      status = 'running',
+      title = 'terminal(ripgrep)',
+    })
+    eq('50%(1)', get_progress())
+
+    api.nvim_echo({ { 'searching...' } }, true, {
+      kind = 'progress',
+      source = 'tests',
+      title = 'second-item',
+      status = 'running',
+      percent = 20,
+    })
+    eq('35%(2)', get_progress())
+
+    api.nvim_echo({ { 'searching' } }, true, {
+      id = id1,
+      kind = 'progress',
+      source = 'tests',
+      percent = 100,
+      status = 'success',
+      title = 'terminal(ripgrep)',
+    })
+    eq('20%(1)', get_progress())
+
+    exec('redrawstatus')
+    screen:expect([[
+      ^                                                            |
+      {1:~                                                           }|*13
+      {3:[No Name]                          20%(1) 0,0-1          All}|
+      {131:terminal(ripgrep)}: {19:100% }searching                           |
+    ]])
+
+    -- Progress_status only shown on active window
+    exec('split')
+    screen:expect([[
+      ^                                                            |
+      {1:~                                                           }|*6
+      {3:[No Name]                          20%(1) 0,0-1          All}|
+                                                                  |
+      {1:~                                                           }|*5
+      {2:[No Name]                                 0,0-1          All}|
+      {131:terminal(ripgrep)}: {19:100% }searching                           |
+    ]])
+
+    exec('wincmd w')
+    screen:expect([[
+                                                                  |
+      {1:~                                                           }|*6
+      {2:[No Name]                                 0,0-1          All}|
+      ^                                                            |
+      {1:~                                                           }|*5
+      {3:[No Name]                          20%(1) 0,0-1          All}|
+      {131:terminal(ripgrep)}: {19:100% }searching                           |
+    ]])
+  end)
+end)
+
+describe('default rulerformat', function()
+  local screen
+
+  before_each(function()
+    clear()
+    screen = Screen.new(60, 16)
+    command('set ruler')
+  end)
+
+  it('setting rulerformat to empty string sets default rulerformat', function()
+    exec_lua("vim.o.rulerformat = 'hjkl'")
+    eq('hjkl', eval('&rulerformat'))
+    screen:expect([[
+      ^                                                            |
+      {1:~                                                           }|*14
+                                                hjkl              |
+    ]])
+
+    local default_rulerformat = '%18(%l,%c%V%= %P%)%<'
+
+    exec_lua("vim.o.rulerformat = ''")
+    eq(default_rulerformat, eval('&rulerformat'))
+    screen:expect([[
+      ^                                                            |
+      {1:~                                                           }|*14
+                                                0,0-1          All|
+    ]])
+
+    -- Reset to default if there's an error.
+    command('set rulerformat=%{a%}')
+    eq(default_rulerformat, eval('&rulerformat'))
+    eq(default_rulerformat, eval('&g:rulerformat'))
+    eq(default_rulerformat, eval('&l:rulerformat'))
+    command('redrawstatus') -- like Vim, rulerformat isn't immediately redrawn after an error
+    screen:expect([[
+      ^                                                            |
+      {1:~                                                           }|*14
+      {9:E121: Undefined variable: a}               0,0-1          All|
+    ]])
+  end)
+end)
+
+describe("'statusline' in floatwin", function()
+  local screen
+  before_each(function()
+    clear()
+    screen = Screen.new(30, 20)
+    screen:add_extra_attr_ids({
+      [101] = { foreground = Screen.colors.Magenta1, bold = true },
+      [102] = {
+        foreground = Screen.colors.Magenta1,
+        underline = true,
+        background = Screen.colors.LightGray,
+        bold = true,
+      },
+    })
+  end)
+
+  it('controlled by ":setlocal statusline" and "style" and "laststatus"', function()
+    local buf = api.nvim_create_buf(false, false)
+    api.nvim_buf_set_lines(buf, 0, -1, false, { '1', '2', '3', '4' })
+    local cfg = {
+      relative = 'editor',
+      row = 1,
+      col = 1,
+      height = 4,
+      width = 10,
+      border = 'single',
+    }
+    local win = api.nvim_open_win(buf, true, cfg)
+    local set_stl = [[setlocal stl=%f\ %m]]
+    command('set laststatus=2')
+    command(set_stl)
+    local has_stl = [[
+                                    |
+      {1:~}{4:┌──────────┐}{1:                 }|
+      {1:~}{4:│^1         │}{1:                 }|
+      {1:~}{4:│2         │}{1:                 }|
+      {1:~}{4:│3         │}{1:                 }|
+      {1:~}{4:│4         │}{1:                 }|
+      {1:~}{4:│}{3:<Name] [+]}{4:│}{1:                 }|
+      {1:~}{4:└──────────┘}{1:                 }|
+      {1:~                             }|*10
+      {2:[No Name]                     }|
+                                    |
+    ]]
+    screen:expect(has_stl)
+
+    -- setting the style will clear the statusline expression for floating windows
+    api.nvim_win_set_config(win, { style = 'minimal' })
+    local without_stl = [[
+                                    |
+      {1:~}{4:┌──────────┐}{1:                 }|
+      {1:~}{4:│^1         │}{1:                 }|
+      {1:~}{4:│2         │}{1:                 }|
+      {1:~}{4:│3         │}{1:                 }|
+      {1:~}{4:│4         │}{1:                 }|
+      {1:~}{4:└──────────┘}{1:                 }|
+      {1:~                             }|*11
+      {2:[No Name]                     }|
+                                    |
+    ]]
+    screen:expect(without_stl)
+
+    -- no statusline is displayed because the statusline option was cleared
+    api.nvim_win_set_config(win, cfg)
+    screen:expect_unchanged()
+
+    -- displayed after the option is reset
+    command(set_stl)
+    screen:expect(has_stl)
+
+    -- Show in a new window in a new tab, then return to the previous tab;
+    -- remove the statusline of the new window, When re-entering this new tab,
+    -- the statusline of the new window is cleared
+    command('tabnew')
+    local win2 = api.nvim_open_win(buf, false, cfg)
+    command(set_stl)
+    screen:expect([[
+      {24: }{102:2}{24:+ [No Name] }{5: }{101:2}{5:+ [No Name] }{2: }{24:X}|
+      ^ {4:┌──────────┐}                 |
+      {1:~}{4:│1         │}{1:                 }|
+      {1:~}{4:│2         │}{1:                 }|
+      {1:~}{4:│3         │}{1:                 }|
+      {1:~}{4:│4         │}{1:                 }|
+      {1:~}{4:└──────────┘}{1:                 }|
+      {1:~                             }|*11
+      {3:[No Name]                     }|
+                                    |
+    ]])
+    command('tabfirst')
+    api.nvim_win_set_config(win2, { style = 'minimal' })
+    screen:expect([[
+      {5: }{101:2}{5:+ [No Name] }{24: }{102:2}{24:+ [No Name] }{2: }{24:X}|
+       {4:┌──────────┐}                 |
+      {1:~}{4:│^1         │}{1:                 }|
+      {1:~}{4:│2         │}{1:                 }|
+      {1:~}{4:│3         │}{1:                 }|
+      {1:~}{4:│4         │}{1:                 }|
+      {1:~}{4:│}{3:<Name] [+]}{4:│}{1:                 }|
+      {1:~}{4:└──────────┘}{1:                 }|
+      {1:~                             }|*10
+      {2:[No Name]                     }|
+                                    |
+    ]])
+    command('tabnext')
+    screen:expect([[
+      {24: }{102:2}{24:+ [No Name] }{5: }{101:2}{5:+ [No Name] }{2: }{24:X}|
+      ^ {4:┌──────────┐}                 |
+      {1:~}{4:│1         │}{1:                 }|
+      {1:~}{4:│2         │}{1:                 }|
+      {1:~}{4:│3         │}{1:                 }|
+      {1:~}{4:│4         │}{1:                 }|
+      {1:~}{4:└──────────┘}{1:                 }|
+      {1:~                             }|*11
+      {3:[No Name]                     }|
+                                    |
+    ]])
+    -- clear statusline when laststatus is 3
+    command('tabclose | set laststatus=2')
+    screen:expect([[
+                                    |
+      {1:~}{4:┌──────────┐}{1:                 }|
+      {1:~}{4:│^1         │}{1:                 }|
+      {1:~}{4:│2         │}{1:                 }|
+      {1:~}{4:│3         │}{1:                 }|
+      {1:~}{4:│4         │}{1:                 }|
+      {1:~}{4:│}{3:<Name] [+]}{4:│}{1:                 }|
+      {1:~}{4:└──────────┘}{1:                 }|
+      {1:~                             }|*10
+      {2:[No Name]                     }|
+                                    |
+    ]])
+    command('set laststatus=0')
+    screen:expect([[
+                                    |
+      {1:~}{4:┌──────────┐}{1:                 }|
+      {1:~}{4:│^1         │}{1:                 }|
+      {1:~}{4:│2         │}{1:                 }|
+      {1:~}{4:│3         │}{1:                 }|
+      {1:~}{4:│4         │}{1:                 }|
+      {1:~}{4:└──────────┘}{1:                 }|
+      {1:~                             }|*12
+                                    |
+    ]])
+
+    command('set laststatus=3')
+    screen:expect([[
+                                    |
+      {1:~}{4:┌──────────┐}{1:                 }|
+      {1:~}{4:│^1         │}{1:                 }|
+      {1:~}{4:│2         │}{1:                 }|
+      {1:~}{4:│3         │}{1:                 }|
+      {1:~}{4:│4         │}{1:                 }|
+      {1:~}{4:└──────────┘}{1:                 }|
+      {1:~                             }|*11
+      {3:[No Name] [+]                 }|
+                                    |
+    ]])
+    api.nvim_buf_set_name(buf, 'stl_test')
+    screen:expect([[
+                                    |
+      {1:~}{4:┌──────────┐}{1:                 }|
+      {1:~}{4:│^1         │}{1:                 }|
+      {1:~}{4:│2         │}{1:                 }|
+      {1:~}{4:│3         │}{1:                 }|
+      {1:~}{4:│4         │}{1:                 }|
+      {1:~}{4:└──────────┘}{1:                 }|
+      {1:~                             }|*11
+      {3:stl_test [+]                  }|
+                                    |
+    ]])
+  end)
+
+  it("clears inherited window-local 'statusline' on creation", function()
+    command('set laststatus=2')
+    api.nvim_set_option_value('statusline', 'global', {})
+    local curwin = api.nvim_get_current_win()
+    api.nvim_set_option_value('statusline', 'split-local', { win = curwin })
+    api.nvim_open_win(0, true, { relative = 'editor', row = 1, col = 1, height = 2, width = 4 })
+    screen:expect([[
+                                    |
+      {1:~}{4:^    }{1:                         }|
+      {1:~}{11:~   }{1:                         }|
+      {1:~                             }|*15
+      {2:split-local                   }|
+                                    |
     ]])
   end)
 end)

@@ -276,8 +276,13 @@ func Test_unicode()
 endfunc
 
 " Test vim.eval() with various types.
-func Test_python3_vim_val()
-  call assert_equal("\n8",             execute('py3 print(vim.eval("3+5"))'))
+func Test_python3_vim_eval()
+  call assert_equal("\n2061300532912", execute('py3 print(vim.eval("2061300532912"))'))
+  call assert_equal("\n9223372036854775807", execute('py3 print(vim.eval("9223372036854775807"))'))
+  call assert_equal("\n-9223372036854775807",execute('py3 print(vim.eval("-9223372036854775807"))'))
+  call assert_equal("\n2147483648",  execute('py3 print(vim.eval("2147483648"))'))
+  call assert_equal("\n-2147483649", execute('py3 print(vim.eval("-2147483649"))'))
+  call assert_equal("\n8",           execute('py3 print(vim.eval("3+5"))'))
   if has('float')
     call assert_equal("\n3.1399999999999997",    execute('py3 print(vim.eval("1.01+2.13"))'))
     call assert_equal("\n0.0",    execute('py3 print(vim.eval("0.0/(1.0/0.0)"))'))
@@ -3665,6 +3670,39 @@ func Test_python3_keyboard_interrupt()
   call assert_equal(expected, getline(2, '$'))
   call assert_equal('', output)
   close!
+endfunc
+
+func Test_python3_fold_hidden_buffer()
+  CheckFeature folding
+
+  set fdm=expr fde=Fde(v:lnum)
+  let b:regex = '^'
+  func Fde(lnum)
+    let ld = [{}]
+    let lines = bufnr('%')->getbufline(1, '$')
+    let was_import = 0
+    for lnum in range(1, len(lines))
+      let line = lines[lnum]
+      call add(ld, {'a': b:regex})
+      let ld[lnum].foldexpr = was_import ? 1 : '>1'
+      let was_import = 1
+    endfor
+    return ld[a:lnum].foldexpr
+  endfunc
+
+  call setline(1, repeat([''], 15) + repeat(['from'], 3))
+  eval repeat(['x'], 17)->writefile('Xa.txt')
+  split Xa.txt
+  py3 import vim
+  py3 b = vim.current.buffer
+  py3 aaa = b[:]
+  hide
+  py3 b[:] = aaa
+
+  call delete('Xa.txt')
+  set fdm& fde&
+  delfunc Fde
+  bwipe! Xa.txt
 endfunc
 
 " vim: shiftwidth=2 sts=2 expandtab

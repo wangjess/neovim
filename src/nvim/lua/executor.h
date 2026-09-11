@@ -43,6 +43,7 @@ typedef enum {
                 ///< Should also be used when return value is ignored, as it is allocation-free
   kRetLuaref,   ///< return value becomes a single Luaref, regardless of type (except NIL)
   kRetMulti,    ///< like kRetObject but return multiple return values as an Array
+  kRetMultiStack,  ///< like kRetMulti but leave values on the lua stack
 } LuaRetMode;
 
 /// Maximum number of errors in vim.ui_attach() and decor provider callbacks.
@@ -55,3 +56,13 @@ enum { CB_MAX_ERROR = 3, };
 
 EXTERN nlua_ref_state_t *nlua_global_refs INIT( = NULL);
 EXTERN bool nlua_disable_preload INIT( = false);
+
+/// Tracks the active Lua thread
+extern lua_State *active_lstate;
+
+#define ENTER_LUA_ACTIVE_STATE(new_state) \
+  lua_State *const save_active_lstate = active_lstate; \
+  active_lstate = (new_state);
+
+#define LEAVE_LUA_ACTIVE_STATE() \
+  active_lstate = save_active_lstate;

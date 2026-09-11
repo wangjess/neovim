@@ -90,15 +90,25 @@ static int lookup_colour(const VTermState *state, int palette, const long args[]
                          VTermColor *col)
 {
   switch (palette) {
-  case 2:  // RGB mode - 3 args contain colour values directly
-    if (argcount < 3) {
+  case 2: {  // RGB mode - 3 args contain colour values directly
+    // ITU-T T.416 places a colour space id before R:G:B, as in "38:2::R:G:B".
+    // Skip it when this colon-separated group holds more than three arguments.
+    int grouplen = 0;
+    while (grouplen < argcount && CSI_ARG_HAS_MORE(args[grouplen])) {
+      grouplen++;
+    }
+    grouplen = grouplen < argcount ? grouplen + 1 : argcount;
+    const int skip = grouplen > 3 ? 1 : 0;
+
+    if (argcount - skip < 3) {
       return argcount;
     }
 
-    vterm_color_rgb(col, (uint8_t)CSI_ARG(args[0]), (uint8_t)CSI_ARG(args[1]),
-                    (uint8_t)CSI_ARG(args[2]));
+    vterm_color_rgb(col, (uint8_t)CSI_ARG(args[skip]), (uint8_t)CSI_ARG(args[skip + 1]),
+                    (uint8_t)CSI_ARG(args[skip + 2]));
 
-    return 3;
+    return skip + 3;
+  }
 
   case 5:  // XTerm 256-colour mode
     if (!argcount || CSI_ARG_IS_MISSING(args[0])) {
@@ -182,6 +192,8 @@ void vterm_state_resetpen(VTermState *state)
   state->pen.font = 0;      setpenattr_int(state, VTERM_ATTR_FONT, 0);
   state->pen.small = 0;     setpenattr_bool(state, VTERM_ATTR_SMALL, 0);
   state->pen.baseline = 0;  setpenattr_int(state, VTERM_ATTR_BASELINE, 0);
+  state->pen.dim = 0;       setpenattr_bool(state, VTERM_ATTR_DIM, 0);
+  state->pen.overline = 0;  setpenattr_bool(state, VTERM_ATTR_OVERLINE, 0);
 
   state->pen.fg = state->default_fg;
   setpenattr_col(state, VTERM_ATTR_FOREGROUND, state->default_fg);
@@ -208,6 +220,8 @@ void vterm_state_savepen(VTermState *state, int save)
     setpenattr_int(state, VTERM_ATTR_FONT,      state->pen.font);
     setpenattr_bool(state, VTERM_ATTR_SMALL,     state->pen.small);
     setpenattr_int(state, VTERM_ATTR_BASELINE,  state->pen.baseline);
+    setpenattr_bool(state, VTERM_ATTR_DIM,      state->pen.dim);
+    setpenattr_bool(state, VTERM_ATTR_OVERLINE, state->pen.overline);
 
     setpenattr_col(state, VTERM_ATTR_FOREGROUND, state->pen.fg);
     setpenattr_col(state, VTERM_ATTR_BACKGROUND, state->pen.bg);
@@ -285,6 +299,11 @@ void vterm_state_setpen(VTermState *state, const long args[], int argcount)
       break;
     }
 
+    case 2:  // Dim/faint on
+      state->pen.dim = 1;
+      setpenattr_bool(state, VTERM_ATTR_DIM, 1);
+      break;
+
     case 3:  // Italic on
       state->pen.italic = 1;
       setpenattr_bool(state, VTERM_ATTR_ITALIC, 1);
@@ -351,9 +370,11 @@ void vterm_state_setpen(VTermState *state, const long args[], int argcount)
       setpenattr_int(state, VTERM_ATTR_UNDERLINE, state->pen.underline);
       break;
 
-    case 22:  // Bold off
+    case 22:  // Normal intensity (bold and dim off)
       state->pen.bold = 0;
       setpenattr_bool(state, VTERM_ATTR_BOLD, 0);
+      state->pen.dim = 0;
+      setpenattr_bool(state, VTERM_ATTR_DIM, 0);
       break;
 
     case 23:  // Italic and Gothic (currently unsupported) off
@@ -439,6 +460,16 @@ void vterm_state_setpen(VTermState *state, const long args[], int argcount)
     case 49:  // Default background
       state->pen.bg = state->default_bg;
       setpenattr_col(state, VTERM_ATTR_BACKGROUND, state->pen.bg);
+      break;
+
+    case 53:  // Overline on
+      state->pen.overline = 1;
+      setpenattr_bool(state, VTERM_ATTR_OVERLINE, 1);
+      break;
+
+    case 55:  // Overline off
+      state->pen.overline = 0;
+      setpenattr_bool(state, VTERM_ATTR_OVERLINE, 0);
       break;
 
     case 73:  // Superscript
@@ -528,6 +559,10 @@ int vterm_state_getpen(VTermState *state, long args[], int argcount)
     args[argi++] = 1;
   }
 
+  if (state->pen.dim) {
+    args[argi++] = 2;
+  }
+
   if (state->pen.italic) {
     args[argi++] = 3;
   }
@@ -566,6 +601,10 @@ int vterm_state_getpen(VTermState *state, long args[], int argcount)
   argi = vterm_state_getpen_color(&state->pen.fg, argi, args, true);
 
   argi = vterm_state_getpen_color(&state->pen.bg, argi, args, false);
+
+  if (state->pen.overline) {
+    args[argi++] = 53;
+  }
 
   if (state->pen.small) {
     if (state->pen.baseline == VTERM_BASELINE_RAISE) {
@@ -629,6 +668,12 @@ int vterm_state_set_penattr(VTermState *state, VTermAttr attr, VTermValueType ty
     break;
   case VTERM_ATTR_URI:
     state->pen.uri = val->number;
+    break;
+  case VTERM_ATTR_DIM:
+    state->pen.dim = (unsigned)val->boolean;
+    break;
+  case VTERM_ATTR_OVERLINE:
+    state->pen.overline = (unsigned)val->boolean;
     break;
   default:
     return 0;

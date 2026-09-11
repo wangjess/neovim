@@ -14,6 +14,7 @@
 #include "nvim/api/private/defs.h"
 #include "nvim/api/private/helpers.h"
 #include "nvim/ascii_defs.h"
+#include "nvim/charset.h"
 #include "nvim/cursor_shape.h"
 #include "nvim/event/defs.h"
 #include "nvim/event/loop.h"
@@ -24,6 +25,7 @@
 #include "nvim/grid.h"
 #include "nvim/highlight_defs.h"
 #include "nvim/log.h"
+#include "nvim/lua/executor.h"
 #include "nvim/macros_defs.h"
 #include "nvim/main.h"
 #include "nvim/map_defs.h"
@@ -33,14 +35,17 @@
 #include "nvim/os/input.h"
 #include "nvim/os/os.h"
 #include "nvim/os/os_defs.h"
+#include "nvim/os/time.h"
 #include "nvim/strings.h"
 #include "nvim/tui/input.h"
+#include "nvim/tui/termdef_field_defs.h"
 #include "nvim/tui/terminfo.h"
 #include "nvim/tui/tui.h"
+#include "nvim/tui/ugrid.h"
 #include "nvim/types_defs.h"
-#include "nvim/ugrid.h"
 #include "nvim/ui_client.h"
 #include "nvim/ui_defs.h"
+#include "nvim/vim_defs.h"
 
 #ifdef MSWIN
 # include "nvim/os/os_win_console.h"
@@ -86,6 +91,7 @@ struct TUIData {
   int row, col;
   int out_fd;
   int pending_resize_events;
+  bool terminfo_found_in_db;
   bool can_change_scroll_region;
   bool has_left_and_right_margin_mode;
   bool has_sync_mode;
@@ -99,6 +105,7 @@ struct TUIData {
   bool mouse_enabled_save;
   bool title_enabled;
   bool sync_output;
+  bool sync_output_active;
   bool busy, is_invisible, want_invisible;
   bool set_cursor_color_as_str;
   bool cursor_has_color;
@@ -140,6 +147,11 @@ struct TUIData {
   StringBuilder urlbuf;  ///< Re-usable buffer for writing OSC 8 control sequences
   Arena ti_arena;
 };
+
+typedef enum {
+  kFlushBufPartial,
+  kFlushBufFinal,
+} FlushBufFinish;
 
 static bool cursor_style_enabled = false;
 #include "tui/tui.c.generated.h"
@@ -219,7 +231,10 @@ void tui_handle_term_mode(TUIData *tui, TermMode mode, TermModeState state)
   case kTermModePermanentlyReset:
     // TODO(bfredl): This is really ILOG but we want it in all builds.
     // add to show_verbose_terminfo() without being too racy ????
-    WLOG("TUI: terminal mode %d unavailable, state %d", mode, state);
+    if (!nvim_testing) {
+      // Very noisy in CI, don't log during tests. #33599
+      WLOG("TUI: terminal mode %d unavailable, state %d", mode, state);
+    }
     // If the mode is not recognized, or if the terminal emulator does not allow it to be changed,
     // then there is nothing to do
     break;
@@ -229,7 +244,10 @@ void tui_handle_term_mode(TUIData *tui, TermMode mode, TermModeState state)
     FALLTHROUGH;
   case kTermModeReset:
     // The terminal supports changing the given mode
-    WLOG("TUI: terminal mode %d detected, state %d", mode, state);
+    if (!nvim_testing) {
+      // Very noisy in CI, don't log during tests. #33599
+      WLOG("TUI: terminal mode %d detected, state %d", mode, state);
+    }
     switch (mode) {
     case kTermModeSynchronizedOutput:
       // Ref: https://gist.github.com/christianparpart/d8a62cc1ab659194337d73e399004036
@@ -329,16 +347,122 @@ static void tui_reset_key_encoding(TUIData *tui)
   }
 }
 
-/// Write the OSC 11 sequence to the terminal emulator to query the current
-/// background color.
+static void tui_query_bg_color_noflush(TUIData *tui)
+  FUNC_ATTR_NONNULL_ALL
+{
+  out(tui, S_LEN("\x1b]11;?\x07\x1b[5n"));
+}
+
+/// Write the OSC 11 + DSR sequence to the terminal emulator to query the current
+/// background color, and flush the terminal.
 ///
-/// The response will be handled by the TermResponse autocommand created in
-/// _defaults.lua.
+/// Response will be handled by the TermResponse handler in _core/defaults.lua.
 void tui_query_bg_color(TUIData *tui)
   FUNC_ATTR_NONNULL_ALL
 {
-  out(tui, S_LEN("\x1b]11;?\x07"));
-  flush_buf(tui);
+  tui_query_bg_color_noflush(tui);
+  flush_buf(tui, kFlushBufFinal);
+}
+
+/// Use $NVIM_TERMDEFS to apply user overrides to terminfo. This is our own homebaked "terminfo",
+/// analogous to Vim's t_xx options. #37274
+///
+/// This also positions us to drop Unibilium entirely.
+static void apply_termdefs(TUIData *tui)
+{
+  // We allow empty values just to provide the user with a warning
+  if (!os_env_exists("NVIM_TERMDEFS", false)) {
+    return;
+  }
+
+  Error lua_err = ERROR_INIT;
+  Object rv = NLUA_EXEC_STATIC("return require('vim.tty')._get_termdefs()",
+                               (Array)ARRAY_DICT_INIT, kRetObject, NULL, &lua_err);
+  if (rv.type != kObjectTypeDict) {
+    return;
+  }
+
+  init_termdef_fields();
+
+  Arena err_arena = ARENA_EMPTY;
+  Array chunks = ARRAY_DICT_INIT;
+  int err_count = 0;
+
+#define PUSH_ERR(fmt, ...) \
+  do { \
+    String str = arena_printf(&err_arena, fmt, __VA_ARGS__); \
+    Array err = arena_array(&err_arena, 2); \
+    ADD(err, STRING_OBJ(str)); \
+    ADD(err, STATIC_CSTR_AS_OBJ("ErrorMsg")); \
+    ADD(chunks, ARRAY_OBJ(err)); \
+    err_count++; \
+  } while (0)
+
+  for (size_t i = 0; i < rv.data.dict.size; i++) {
+    KeyValuePair kv = rv.data.dict.items[i];
+    TermdefField *td_field = pmap_get(cstr_t)(&termdef_fields, kv.key.data);
+    if (!td_field || kv.value.type != td_field->type) {
+      PUSH_ERR("skipping invalid field in $NVIM_TERMDEFS: '%s'\n", kv.key.data);
+      continue;
+    }
+    Object val = kv.value;
+    char *dst = (char *)&tui->ti + td_field->offset;
+
+    switch (val.type) {
+    case kObjectTypeBoolean:
+      *(bool *)dst = val.data.boolean;
+      break;
+    case kObjectTypeInteger:
+      *(int *)dst = (int)val.data.integer;
+      break;
+    case kObjectTypeString:
+      *(const char **)dst = arena_strdup(&tui->ti_arena,
+                                         val.data.string.data);
+      break;
+    case kObjectTypeArray:
+      if (val.data.array.size > 2) {
+        PUSH_ERR(
+                "skipping invalid field definition in $NVIM_TERMDEFS for %s: array should have at most two entries for unshifted and shifted key variants.\n",
+                kv.key.data);
+        continue;
+      }
+      *(const char **)dst = NULL;
+      *(const char **)(dst + sizeof(char *)) = NULL;
+
+      for (size_t key_map_idx = 0; key_map_idx < val.data.array.size;
+           key_map_idx++) {
+        Object key_mapping = val.data.array.items[key_map_idx];
+        if (key_mapping.type != kObjectTypeString) {
+          PUSH_ERR(
+                  "skipping invalid field definition in $NVIM_TERMDEFS for %s[%zu]: expected type 'string'\n",
+                  kv.key.data, key_map_idx);
+          continue;
+        }
+        size_t offset = key_map_idx * sizeof(char *);
+        *(const char **)(dst + offset) = arena_strdup(&tui->ti_arena, key_mapping.data.string.data);
+      }
+      break;
+    default:
+      break;
+    }
+  }
+
+  if (err_count > 0) {
+    MAXSIZE_TEMP_ARRAY(args, 3);
+    ADD_C(args, ARRAY_OBJ(chunks));
+    ADD_C(args, BOOLEAN_OBJ(true));  // history
+    MAXSIZE_TEMP_DICT(opts, 1);
+    PUT_C(opts, "err", BOOLEAN_OBJ(true));
+    ADD_C(args, DICT_OBJ(opts));
+    rpc_send_event(ui_client_channel_id, "nvim_echo", args);
+  }
+
+  arena_mem_free(arena_finish(&err_arena));
+  kv_destroy(chunks);
+  api_free_object(rv);
+  api_clear_error(&lua_err);
+
+#undef PUSH_ERR
 }
 
 /// Enable the alternate screen and emit other control sequences to start the TUI.
@@ -382,15 +506,15 @@ static void terminfo_start(TUIData *tui)
 #endif
 
   // Set up terminfo.
-  bool found_in_db = false;
-  if (term) {
-    if (terminfo_from_unibilium(&tui->ti, term, &tui->ti_arena)) {
+  tui->terminfo_found_in_db = false;
+  if (term && !os_env_exists("NVIM_TERMDEFS", false)) {
+    if (terminfo_from_database(&tui->ti, term, &tui->ti_arena)) {
       tui->term = arena_strdup(&tui->ti_arena, term);
-      found_in_db = true;
+      tui->terminfo_found_in_db = true;
     }
   }
 
-  if (!found_in_db) {
+  if (!tui->terminfo_found_in_db) {
     const TerminfoEntry *new = terminfo_from_builtin(term, &tui->term);
     // we will patch it below, so make a copy
     memcpy(&tui->ti, new, sizeof tui->ti);
@@ -403,14 +527,16 @@ static void terminfo_start(TUIData *tui)
   char *konsolev_env = os_getenv("KONSOLE_VERSION");
   char *term_program_version_env = os_getenv("TERM_PROGRAM_VERSION");
 
-  int vtev = vte_version_env ? (int)strtol(vte_version_env, NULL, 10) : 0;
+  char *vte_version_end = vte_version_env;
+  int vtev = vte_version_env ? getdigits_int(&vte_version_end, false, 0) : 0;
   bool iterm_env = termprg && strstr(termprg, "iTerm.app");
   bool nsterm = (termprg && strstr(termprg, "Apple_Terminal"))
                 || terminfo_is_term_family(term, "nsterm");
   bool konsole = terminfo_is_term_family(term, "konsole")
                  || os_env_exists("KONSOLE_PROFILE_NAME", true)
                  || os_env_exists("KONSOLE_DBUS_SESSION", true);
-  int konsolev = konsolev_env ? (int)strtol(konsolev_env, NULL, 10)
+  char *konsolev_end = konsolev_env;
+  int konsolev = konsolev_env ? getdigits_int(&konsolev_end, false, 0)
                               : (konsole ? 1 : 0);
   bool wezterm = strequal(termprg, "WezTerm");
   const char *weztermv = wezterm ? term_program_version_env : NULL;
@@ -423,6 +549,7 @@ static void terminfo_start(TUIData *tui)
 
   patch_terminfo_bugs(tui, term, colorterm, vtev, konsolev, iterm_env, nsterm);
   augment_terminfo(tui, term, vtev, konsolev, weztermv, iterm_env, nsterm);
+  apply_termdefs(tui);
 
 #define TI_HAS(name) (tui->ti.defs[name] != NULL)
   tui->can_change_scroll_region = TI_HAS(kTerm_change_scroll_region);
@@ -439,7 +566,7 @@ static void terminfo_start(TUIData *tui)
     || terminfo_is_term_family(term, "cygwin")
     || terminfo_is_term_family(term, "win32con")
     || terminfo_is_term_family(term, "interix");
-  tui->bce = tui->ti.bce;
+  tui->bce = tui->ti.back_color_erase;
   // Set 't_Co' from the result of terminfo & fix_terminfo.
   t_colors = tui->ti.max_colors;
   // Enter alternate screen, save title, and clear.
@@ -476,6 +603,11 @@ static void terminfo_start(TUIData *tui)
   // Query the terminal to see if it supports Kitty's keyboard protocol
   tui_query_kitty_keyboard(tui);
 
+  // Query the terminal's background color. We normally get it via continuous reporting (set via
+  // `kTermModeThemeUpdates` above), but if we were backgrounded while the light/dark mode changed,
+  // we won't have received the report, so we also query it on resume.
+  tui_query_bg_color_noflush(tui);
+
   int ret;
   uv_loop_init(&tui->write_loop);
   if (tui->out_isatty) {
@@ -505,7 +637,7 @@ static void terminfo_start(TUIData *tui)
       ELOG("uv_pipe_open failed: %s", uv_strerror(ret));
     }
   }
-  flush_buf(tui);
+  flush_buf(tui, kFlushBufFinal);
 
   xfree(term);
   xfree(colorterm);
@@ -561,7 +693,7 @@ static void terminfo_disable(TUIData *tui)
   out(tui, S_LEN("\x1b[c"));
 
   // Immediately flush the buffer and wait for the DA1 response.
-  flush_buf(tui);
+  flush_buf(tui, kFlushBufFinal);
 }
 
 /// Disable the alternate screen and prepare for the TUI to close.
@@ -581,7 +713,7 @@ static void terminfo_stop(TUIData *tui)
     terminfo_out(tui, kTerm_exit_ca_mode);
   }
 
-  flush_buf(tui);
+  flush_buf(tui, kFlushBufFinal);
   uv_tty_reset_mode();
   uv_close((uv_handle_t *)&tui->output_handle, NULL);
   uv_run(&tui->write_loop, UV_RUN_DEFAULT);
@@ -617,7 +749,7 @@ static void tui_terminal_after_startup(TUIData *tui)
   // Emit this after Nvim startup, not during.  This works around a tmux
   // 2.3 bug(?) which caused slow drawing during startup.  #7649
   out_len(tui, tui->terminfo_ext.enable_focus_reporting);
-  flush_buf(tui);
+  flush_buf(tui, kFlushBufFinal);
 }
 
 void tui_stop(TUIData *tui)
@@ -634,9 +766,10 @@ void tui_stop(TUIData *tui)
   terminfo_disable(tui);
 
   // Wait until DA1 response is received, or stdin is closed (#35744).
+  uint64_t wait_start = os_hrtime();
   LOOP_PROCESS_EVENTS_UNTIL(tui->loop, tui->loop->events, EXIT_TIMEOUT_MS,
                             tui->stopped || tui->input.read_stream.did_eof);
-  if (!tui->stopped && !tui->input.read_stream.did_eof) {
+  if (!tui->stopped && (os_hrtime() - wait_start) / 1000000 >= EXIT_TIMEOUT_MS) {
     WLOG("TUI: timed out waiting for DA1 response");
   }
   tui->stopped = true;
@@ -746,6 +879,10 @@ static void update_attrs(TUIData *tui, int attr_id)
   bool standout = attr & HL_STANDOUT;
   bool strikethrough = attr & HL_STRIKETHROUGH;
   bool altfont = attr & HL_ALTFONT;
+  bool dim = attr & HL_DIM;
+  bool blink = attr & HL_BLINK;
+  bool conceal = attr & HL_CONCEALED;
+  bool overline = attr & HL_OVERLINE;
 
   bool underline;
   bool undercurl;
@@ -771,13 +908,13 @@ static void update_attrs(TUIData *tui, int attr_id)
                            || underdouble || underdotted || underdashed;
 
   if (tui->ti.defs[kTerm_set_attributes] != NULL) {
-    if (bold || reverse || underline || standout) {
+    if (bold || dim || blink || reverse || underline || standout) {
       TPVAR params[9] = { 0 };
       params[0].num = standout;
       params[1].num = underline;
       params[2].num = reverse;
-      params[3].num = 0;   // blink
-      params[4].num = 0;   // dim
+      params[3].num = blink;
+      params[4].num = dim;
       params[5].num = bold;
       params[6].num = 0;   // blank
       params[7].num = 0;   // protect
@@ -802,6 +939,12 @@ static void update_attrs(TUIData *tui, int attr_id)
     if (reverse) {
       terminfo_out(tui, kTerm_enter_reverse_mode);
     }
+    if (dim) {
+      terminfo_out(tui, kTerm_enter_dim_mode);
+    }
+    if (blink) {
+      terminfo_out(tui, kTerm_enter_blink_mode);
+    }
   }
   if (italic) {
     terminfo_out(tui, kTerm_enter_italics_mode);
@@ -811,6 +954,12 @@ static void update_attrs(TUIData *tui, int attr_id)
   }
   if (strikethrough) {
     terminfo_out(tui, kTerm_enter_strikethrough_mode);
+  }
+  if (conceal) {
+    terminfo_out(tui, kTerm_enter_secure_mode);
+  }
+  if (overline) {
+    out(tui, S_LEN("\x1b[53m"));
   }
   if (tui->ti.defs[kTerm_set_underline_style]) {
     if (undercurl) {
@@ -892,14 +1041,14 @@ static void update_attrs(TUIData *tui, int attr_id)
   }
 
   tui->default_attr = fg == -1 && bg == -1
-                      && !bold && !italic && !has_any_underline && !reverse && !standout
-                      && !strikethrough;
+                      && !bold && !dim && !blink && !conceal && !overline && !italic
+                      && !has_any_underline && !reverse && !standout && !strikethrough;
 
   // Non-BCE terminals can't clear with non-default background color. Some BCE
   // terminals don't support attributes either, so don't rely on it. But assume
   // italic and bold has no effect if there is no text.
-  tui->can_clear_attr = !reverse && !standout && !has_any_underline
-                        && !strikethrough && (tui->bce || bg == -1);
+  tui->can_clear_attr = !reverse && !standout && !dim && !blink && !conceal && !overline
+                        && !has_any_underline && !strikethrough && (tui->bce || bg == -1);
 }
 
 static void final_column_wrap(TUIData *tui)
@@ -1074,7 +1223,7 @@ static void print_spaces(TUIData *tui, int width)
     if (left == 0) {
       break;  // likely: didn't need to flush for sm0l spaces
     }
-    flush_buf(tui);
+    flush_buf(tui, kFlushBufPartial);
   }
 
   grid->col += width;
@@ -1157,7 +1306,7 @@ static void clear_region(TUIData *tui, int top, int bot, int left, int right, in
       cursor_goto(tui, row, left);
       if (tui->can_clear_attr && right == tui->width) {
         terminfo_out(tui, kTerm_clr_eol);
-      } else if (tui->can_erase_chars && tui->can_clear_attr && width >= 5) {
+      } else if (tui->can_erase_chars && tui->can_clear_attr) {
         terminfo_print_num1(tui, kTerm_erase_chars, width);
       } else {
         print_spaces(tui, width);
@@ -1250,6 +1399,17 @@ static CursorShape tui_cursor_decode_shape(const char *shape_str)
   return shape;
 }
 
+/// Reset terminal cursor style. This may be different across terminals and
+/// terminal configs. Also, it depends on what escape sequence Unibilium or
+/// terminfo_builtin.h have set for kTerm_reset_cursor_style (which can also
+/// depend on other runtime logic). It doesn't necessarily send out a
+/// `\x1b[0 q` (terminal default) sequence.
+/// See https://ghostty.org/docs/vt/csi/decscusr for more details.
+static void tui_cursor_reset_style(TUIData *tui)
+{
+  terminfo_out(tui, kTerm_reset_cursor_style);
+}
+
 static cursorentry_T decode_cursor_entry(Dict args)
 {
   cursorentry_T r = shape_table[0];
@@ -1275,7 +1435,8 @@ void tui_mode_info_set(TUIData *tui, bool guicursor_enabled, Array args)
 {
   cursor_style_enabled = guicursor_enabled;
   if (!guicursor_enabled) {
-    return;  // Do not send cursor style control codes.
+    tui_cursor_reset_style(tui);
+    return;
   }
 
   assert(args.size);
@@ -1332,6 +1493,7 @@ void tui_mouse_off(TUIData *tui)
 static void tui_set_mode(TUIData *tui, ModeShape mode)
 {
   if (!cursor_style_enabled) {
+    tui_cursor_reset_style(tui);
     return;
   }
   cursorentry_T c = tui->cursor_shapes[mode];
@@ -1383,7 +1545,7 @@ void tui_mode_change(TUIData *tui, String mode, Integer mode_idx)
   // If stdin is not a TTY, the LHS of pipe may change the state of the TTY
   // after calling uv_tty_set_mode. So, set the mode of the TTY again here.
   // #13073
-  if (tui->is_starting && !stdin_isatty) {
+  if (tui->out_isatty && tui->is_starting && !stdin_isatty) {
     int ret = uv_tty_set_mode(&tui->output_handle.tty, UV_TTY_MODE_NORMAL);
     if (ret) {
       ELOG("uv_tty_set_mode failed: %s", uv_strerror(ret));
@@ -1503,12 +1665,12 @@ void tui_visual_bell(TUIData *tui)
   } else {
     out(tui, S_LEN("\x1b[?5h"));
 
-    flush_buf(tui);
+    flush_buf(tui, kFlushBufFinal);
     uv_sleep(100);  // typically either 100 or 200 in terminfo. 100 seems enough
 
     out(tui, S_LEN("\x1b[?5l"));
   }
-  flush_buf(tui);
+  flush_buf(tui, kFlushBufFinal);
 }
 
 void tui_default_colors_set(TUIData *tui, Integer rgb_fg, Integer rgb_bg, Integer rgb_sp,
@@ -1525,10 +1687,16 @@ void tui_default_colors_set(TUIData *tui, Integer rgb_fg, Integer rgb_bg, Intege
   invalidate(tui, 0, tui->grid.height, 0, tui->grid.width);
 }
 
-/// Writes directly to the TTY, bypassing the buffer.
+/// Writes to the TTY, or buffers (to avoid "tearing") if a frame is being assembled (or output is
+/// already buffered).
 void tui_ui_send(TUIData *tui, String content)
   FUNC_ATTR_NONNULL_ALL
 {
+  if (kv_size(tui->invalid_regions) || tui->bufpos > 0) {
+    // Append to buffer instead of writing directly.
+    out(tui, content.data, content.size);
+    return;
+  }
   uv_write_t req;
   uv_buf_t buf = { .base = content.data, .len = UV_BUF_LEN(content.size) };
   int ret = uv_write(&req, (uv_stream_t *)&tui->output_handle, &buf, 1, NULL);
@@ -1584,7 +1752,7 @@ void tui_flush(TUIData *tui)
 
   cursor_goto(tui, tui->row, tui->col);
 
-  flush_buf(tui);
+  flush_buf(tui, kFlushBufFinal);
 }
 
 /// Dumps termcap info to the messages area, if 'verbose' >= 3.
@@ -1596,7 +1764,7 @@ static void show_verbose_terminfo(TUIData *tui)
   ADD_C(title, CSTR_AS_OBJ("Title"));
   ADD_C(chunks, ARRAY_OBJ(title));
   MAXSIZE_TEMP_ARRAY(info, 1);
-  String str = terminfo_info_msg(&tui->ti, tui->term);
+  String str = terminfo_info_msg(&tui->ti, tui->term, tui->terminfo_found_in_db);
   ADD_C(info, STRING_OBJ(str));
   ADD_C(chunks, ARRAY_OBJ(info));
   MAXSIZE_TEMP_ARRAY(end_fold, 2);
@@ -1665,7 +1833,7 @@ void tui_set_title(TUIData *tui, String title)
     if ((sizeof tui->buf - tui->bufpos) < title.size + 2 * TERMINFO_SEQ_LIMIT) {
       // The sequence to set title, is usually an OSC sequence that cannot be cut in half.
       // flush buffer prior to printing to avoid this
-      flush_buf(tui);
+      flush_buf(tui, kFlushBufFinal);
     }
     terminfo_out(tui, kTerm_to_status_line);
     out(tui, title.data, title.size);
@@ -1689,7 +1857,7 @@ void tui_screenshot(TUIData *tui, String path)
   }
 
   UGrid *grid = &tui->grid;
-  flush_buf(tui);
+  flush_buf(tui, kFlushBufFinal);
   grid->row = 0;
   grid->col = 0;
 
@@ -1705,7 +1873,7 @@ void tui_screenshot(TUIData *tui, String path)
       print_cell(tui, buf, cell.attr);
     }
   }
-  flush_buf(tui);
+  flush_buf(tui, kFlushBufFinal);
   tui->screenshot = NULL;
 
   fclose(f);
@@ -1749,7 +1917,7 @@ void tui_chdir(TUIData *tui, String path)
 {
   int err = uv_chdir(path.data);
   if (err != 0) {
-    ELOG("Failed to chdir to %s: %s", path.data, strerror(err));
+    ELOG("Failed to chdir to %s: %s", path.data, uv_strerror(err));
   }
 }
 
@@ -1876,12 +2044,12 @@ static void out(TUIData *tui, const char *str, size_t len)
   size_t available = sizeof(tui->buf) - tui->bufpos;
 
   if (len > available) {
-    flush_buf(tui);
+    flush_buf(tui, kFlushBufPartial);
     if (len > sizeof(tui->buf)) {
       // Don't use tui->buf[] when the string to output is too long. #30794
       tui->buf_to_flush = (char *)str;
       tui->bufpos = len;
-      flush_buf(tui);
+      flush_buf(tui, kFlushBufPartial);
       return;
     }
   }
@@ -1904,7 +2072,7 @@ void out_printf(TUIData *tui, size_t limit, const char *fmt, ...)
   assert(limit <= sizeof(tui->buf));
   size_t available = sizeof(tui->buf) - tui->bufpos;
   if (available < limit) {
-    flush_buf(tui);
+    flush_buf(tui, kFlushBufPartial);
   }
 
   va_list ap;
@@ -1955,7 +2123,7 @@ static void terminfo_print(TUIData *tui, TerminfoDef what, TPVAR *params)
   }
 
   // try again with fresh buffer
-  flush_buf(tui);
+  flush_buf(tui, kFlushBufPartial);
   size_t len = terminfo_fmt(tui->buf + tui->bufpos, tui->buf + sizeof(tui->buf), str, params);
   if (len > 0) {
     tui->bufpos += len;
@@ -1976,7 +2144,7 @@ static void terminfo_set_str(TUIData *tui, TerminfoDef str, const char *val)
 /// Determine if the terminal supports truecolor or not.
 ///
 /// note: We get another chance at detecting these in the nvim server process, see
-/// the use of vim.termcap in runtime/lua/vim/_defaults.lua
+/// the use of vim.tty in runtime/lua/vim/_core/defaults.lua
 ///
 /// If terminfo contains Tc, RGB, or both setrgbf and setrgbb capabilities, return true.
 static bool term_has_truecolor(TUIData *tui, const char *colorterm)
@@ -1986,7 +2154,7 @@ static bool term_has_truecolor(TUIData *tui, const char *colorterm)
     return true;
   }
 
-  if (tui->ti.has_Tc_or_RGB) {
+  if (tui->ti.Tc || tui->ti.RGB) {
     // terminfo had one of "Tc" or "RGB" extended boolean capabilities
     return true;
   }
@@ -2034,6 +2202,7 @@ static void patch_terminfo_bugs(TUIData *tui, const char *term, const char *colo
                                && strstr(colorterm, "mate-terminal");
   bool true_xterm = xterm && !!xterm_version && !bsdvt;
   bool cygwin = terminfo_is_term_family(term, "cygwin");
+  bool ghostty = terminfo_is_term_family(term, "xterm-ghostty");
 
   const char *fix_normal = tui->ti.defs[kTerm_cursor_normal];
   if (fix_normal) {
@@ -2074,7 +2243,7 @@ static void patch_terminfo_bugs(TUIData *tui, const char *term, const char *colo
 
   if (tmux || screen || kitty) {
     // Disable BCE in some cases we know it is not working. #8806
-    tui->ti.bce = false;
+    tui->ti.back_color_erase = false;
   }
 
   if (xterm || hterm) {
@@ -2109,6 +2278,12 @@ static void patch_terminfo_bugs(TUIData *tui, const char *term, const char *colo
     // 2017-04 terminfo.src has older control sequences.
     terminfo_set_str(tui, kTerm_enter_ca_mode, "\x1b[?1049h");
     terminfo_set_str(tui, kTerm_exit_ca_mode, "\x1b[?1049l");
+    // rxvt-unicode has a default steady block cursor, though there's an option
+    // to initialize it with an underline https://cvs.schmorp.de/rxvt-unicode/src/init.C?revision=1.351&view=markup#l727
+    // \x1b[0 q doesn't work because it makes it a blinking block https://cvs.schmorp.de/rxvt-unicode/src/command.C?revision=1.605&view=markup#l4122
+    // We can't really account for that, so just set it to steady block and hope for the best.
+    terminfo_set_str(tui, kTerm_reset_cursor_style, "\x1b[2 q");
+    terminfo_set_str(tui, kTerm_set_cursor_style, "\x1b[%p1%d q");
   } else if (screen) {
     // per the screen manual; 2017-04 terminfo.src lacks these.
     terminfo_set_if_empty(tui, kTerm_to_status_line, "\x1b_");
@@ -2193,74 +2368,60 @@ static void patch_terminfo_bugs(TUIData *tui, const char *term, const char *colo
   // Dickey ncurses terminfo includes Ss/Se capabilities since 2011-07-14. So
   // adding them to terminal types, that have such control sequences but lack
   // the correct terminfo entries, is a fixup, not an augmentation.
-  if (tui->ti.defs[kTerm_set_cursor_style] == NULL) {
-    // DECSCUSR (cursor shape) is widely supported.
-    // https://github.com/gnachman/iTerm2/pull/92
-    if ((!bsdvt && (!konsolev || konsolev >= 180770))
-        && ((xterm && !vte_version)  // anything claiming xterm compat
-            // per MinTTY 0.4.3-1 release notes from 2009
-            || putty
-            // per https://chromium.googlesource.com/apps/libapps/+/a5fb83c190aa9d74f4a9bca233dac6be2664e9e9/hterm/doc/ControlSequences.md
-            || hterm
-            // per https://bugzilla.gnome.org/show_bug.cgi?id=720821
-            || (vte_version >= 3900)
-            || (konsolev >= 180770)  // #9364
-            || tmux       // per tmux manual page
-            // https://lists.gnu.org/archive/html/screen-devel/2013-03/msg00000.html
-            || screen
-            || st         // #7641
-            || rxvt       // per command.C
-            // per analysis of VT100Terminal.m
-            || iterm || iterm_pretending_xterm
-            || teraterm   // per TeraTerm "Supported Control Functions" doco
-            || alacritty  // https://github.com/jwilm/alacritty/pull/608
-            || cygwin
-            || foot
-            // Some linux-type terminals implement the xterm extension.
-            // Example: console-terminal-emulator from the nosh toolset.
-            || (linuxvt
-                && (xterm_version || (vte_version > 0) || colorterm)))) {
-      terminfo_set_str(tui, kTerm_set_cursor_style, "\x1b[%p1%d q");
-      terminfo_set_str(tui, kTerm_reset_cursor_style, "\x1b[ q");
-    } else if (linuxvt) {
-      // Linux uses an idiosyncratic escape code to set the cursor shape and
-      // does not support DECSCUSR.
-      // See http://linuxgazette.net/137/anonymous.html for more info
-      terminfo_set_str(tui, kTerm_set_cursor_style,
-                       "\x1b[?"
-                       "%?"
-                       // The parameter passed to Ss is the DECSCUSR parameter, so the
-                       // terminal capability has to translate into the Linux idiosyncratic
-                       // parameter.
-                       //
-                       // linuxvt only supports block and underline. It is also only
-                       // possible to have a steady block (no steady underline)
-                       "%p1%{2}%<" "%t%{8}"       // blink block
-                       "%e%p1%{2}%=" "%t%{112}"   // steady block
-                       "%e%p1%{3}%=" "%t%{4}"     // blink underline (set to half block)
-                       "%e%p1%{4}%=" "%t%{4}"     // steady underline
-                       "%e%p1%{5}%=" "%t%{2}"     // blink bar (set to underline)
-                       "%e%p1%{6}%=" "%t%{2}"     // steady bar
-                       "%e%{0}"                   // anything else
-                       "%;" "%dc");
-      terminfo_set_str(tui, kTerm_reset_cursor_style, "\x1b[?c");
-    } else if (konsolev > 0 && konsolev < 180770) {
-      // Konsole before version 18.07.70: set up a nonce profile. This has
-      // side effects on temporary font resizing. #6798
-      terminfo_set_str(tui, kTerm_set_cursor_style,
-                       TMUX_WRAP(tmux,
-                                 "\x1b]50;CursorShape=%?"
-                                 "%p1%{3}%<" "%t%{0}"    // block
-                                 "%e%p1%{5}%<" "%t%{2}"  // underline
-                                 "%e%{1}"                // everything else is bar
-                                 "%;%d;BlinkingCursorEnabled=%?"
-                                 "%p1%{1}%<" "%t%{1}"  // Fortunately if we exclude zero as special,
-                                 "%e%p1%{1}%&"  // in all other cases we can treat bit #0 as a flag.
-                                 "%;%d\x07"));
-      terminfo_set_str(tui, kTerm_reset_cursor_style, "\x1b]50;\x07");
-    } else {
-      tui->ti.defs[kTerm_reset_cursor_style] = NULL;
-    }
+  // DECSCUSR (cursor shape) is widely supported.
+  // https://github.com/gnachman/iTerm2/pull/92
+  if (!bsdvt
+      && (putty         // per MinTTY 0.4.3-1 release notes from 2009
+          // per https://chromium.googlesource.com/apps/libapps/+/a5fb83c190aa9d74f4a9bca233dac6be2664e9e9/hterm/doc/ControlSequences.md
+          || hterm
+          // per https://bugzilla.gnome.org/show_bug.cgi?id=720821
+          || vte_version
+          || konsolev   // #9364
+          || tmux       // per tmux manual page
+          // https://lists.gnu.org/archive/html/screen-devel/2013-03/msg00000.html
+          || screen
+          || st         // #7641
+          // https://github.com/gnachman/iTerm2/pull/651
+          || iterm || iterm_pretending_xterm
+          || teraterm   // per TeraTerm "Supported Control Functions" doco
+          || alacritty  // https://github.com/jwilm/alacritty/pull/608
+          || cygwin
+          || foot
+          || kitty      // https://github.com/kovidgoyal/kitty/pull/9929
+          || ghostty    // https://github.com/ghostty-org/ghostty/pull/12487
+          // Some linux-type terminals implement the xterm extension.
+          // Example: console-terminal-emulator from the nosh toolset.
+          || (linuxvt
+              && (xterm_version || colorterm)))) {
+    terminfo_set_str(tui, kTerm_set_cursor_style, "\x1b[%p1%d q");
+    terminfo_set_str(tui, kTerm_reset_cursor_style, "\x1b[0 q");
+  } else if (linuxvt) {
+    // Linux uses an idiosyncratic escape code to set the cursor shape and
+    // does not support DECSCUSR.
+    // See http://linuxgazette.net/137/anonymous.html for more info
+    terminfo_set_str(tui, kTerm_set_cursor_style,
+                     "\x1b[?"
+                     "%?"
+                     // The parameter passed to Ss is the DECSCUSR parameter, so the
+                     // terminal capability has to translate into the Linux idiosyncratic
+                     // parameter.
+                     //
+                     // linuxvt only supports block and underline. It is also only
+                     // possible to have a steady block (no steady underline)
+                     "%p1%{2}%<" "%t%{8}"       // blink block
+                     "%e%p1%{2}%=" "%t%{112}"   // steady block
+                     "%e%p1%{3}%=" "%t%{4}"     // blink underline (set to half block)
+                     "%e%p1%{4}%=" "%t%{4}"     // steady underline
+                     "%e%p1%{5}%=" "%t%{2}"     // blink bar (set to underline)
+                     "%e%p1%{6}%=" "%t%{2}"     // steady bar
+                     "%e%{0}"                   // anything else
+                     "%;" "%dc");
+    terminfo_set_str(tui, kTerm_reset_cursor_style, "\x1b[?c");
+  } else if (!bsdvt && xterm) {
+    terminfo_set_if_empty(tui, kTerm_set_cursor_style, "\x1b[%p1%d q");
+    // xterm has a configurable cursor, but the default is 2, and 0 doesn't
+    // reset to default. #41047
+    terminfo_set_if_empty(tui, kTerm_reset_cursor_style, "\x1b[2 q");
   }
 
   xfree(xterm_version);
@@ -2390,7 +2551,11 @@ static void augment_terminfo(TUIData *tui, const char *term, int vte_version, in
     tui_enable_extended_underline(tui);
   }
 
-  if (!kitty && (vte_version == 0 || vte_version >= 5400)) {
+  if (kitty || (vte_version != 0 && vte_version < 5400)) {
+    // Never use modifyOtherKeys in kitty if kitty keyboard protocol query fails.
+    // Also don't emit the sequence to enable modifyOtherKeys in old VTE versions.
+    tui->input.key_encoding = kKeyEncodingLegacy;
+  } else {
     // Fallback to Xterm's modifyOtherKeys if terminal does not support the
     // Kitty keyboard protocol. We don't actually enable the key encoding here
     // though: it won't be enabled until the terminal responds to our query for
@@ -2406,98 +2571,96 @@ static bool should_invisible(TUIData *tui)
   return tui->busy || tui->want_invisible;
 }
 
-/// Write the sequence to begin flushing output to `buf`.
-/// If 'termsync' is set and the terminal supports synchronized output, begin synchronized update.
-/// Otherwise, hide the cursor to avoid cursor jumping.
-///
-/// @param buf  the buffer to write the sequence to
-/// @param len  the length of `buf`
-static size_t flush_buf_start(TUIData *tui, char *buf, size_t len)
-  FUNC_ATTR_NONNULL_ALL
-{
-  if (tui->sync_output && tui->has_sync_mode) {
-    return xstrlcpy(buf, "\x1b[?2026h", len);
-  } else if (!tui->is_invisible) {
-    tui->is_invisible = true;
-
-    // TODO(bfredl): zero-param terminfo strings should be pre-filtered so we can just
-    // return a cached string here
-    TPVAR null_params[9] = { 0 };
-    const char *str = tui->ti.defs[kTerm_cursor_invisible];
-    if (str != NULL) {
-      return terminfo_fmt(buf, buf + len, str, null_params);
-    }
-  }
-
-  return 0;
-}
-
-/// Write the sequence to end flushing output to `buf`.
-/// If 'termsync' is set and the terminal supports synchronized output, end synchronized update.
-/// Otherwise, make the cursor visible again.
-///
-/// @param buf  the buffer to write the sequence to
-/// @param len  the length of `buf`
-static size_t flush_buf_end(TUIData *tui, char *buf, size_t len)
-  FUNC_ATTR_NONNULL_ALL
-{
-  size_t offset = 0;
-  if (tui->sync_output && tui->has_sync_mode) {
-#define SYNC_END "\x1b[?2026l"
-    memcpy(buf, SYNC_END, sizeof SYNC_END);
-    offset += sizeof SYNC_END - 1;
-  }
-
-  const char *str = NULL;
-  if (tui->is_invisible && !should_invisible(tui)) {
-    str = tui->ti.defs[kTerm_cursor_normal];
-    tui->is_invisible = false;
-  } else if (!tui->is_invisible && should_invisible(tui)) {
-    str = tui->ti.defs[kTerm_cursor_invisible];
-    tui->is_invisible = true;
-  }
-  TPVAR null_params[9] = { 0 };
-  if (str != NULL) {
-    offset += terminfo_fmt(buf + offset, buf + len, str, null_params);
-  }
-
-  return offset;
-}
-
 /// Flushes the rendered buffer to the TTY.
 ///
 /// @see tui_flush
-static void flush_buf(TUIData *tui)
+static void flush_buf(TUIData *tui, FlushBufFinish finish)
+  FUNC_ATTR_NONNULL_ALL
 {
+  bool should_be_invisible = should_invisible(tui);
+
+  // Nothing to flush unless a final flush must end an active synchronized update.
+  if (tui->bufpos <= 0 && tui->is_invisible == should_be_invisible
+      && !(finish == kFlushBufFinal && tui->sync_output_active)) {
+    return;
+  }
+
   uv_write_t req;
   uv_buf_t bufs[3];
   char pre[32];
   char post[32];
+  size_t pre_len = 0;
+  size_t post_len = 0;
+  TPVAR null_params[9] = { 0 };
 
-  if (tui->bufpos <= 0 && tui->is_invisible == should_invisible(tui)) {
-    return;
+  // Begin flushing output. If 'termsync' is set and the terminal supports synchronized
+  // output, begin synchronized update.
+  if (!tui->sync_output_active && tui->sync_output && tui->has_sync_mode) {
+    static const char sync_start[] = "\x1b[?2026h";
+    memcpy(pre, sync_start, sizeof sync_start);
+    pre_len += sizeof sync_start - 1;
+    tui->sync_output_active = true;
+  } else if (!tui->sync_output_active && !tui->is_invisible) {
+    // Otherwise, hide the cursor to avoid cursor jumping.
+    tui->is_invisible = true;
+
+    // TODO(bfredl): zero-param terminfo strings should be pre-filtered so we can just
+    // return a cached string here
+    const char *str = tui->ti.defs[kTerm_cursor_invisible];
+    if (str != NULL) {
+      pre_len += terminfo_fmt(pre + pre_len, pre + sizeof(pre), str, null_params);
+    }
+  }
+
+  // End synchronized update on the final flush.
+  if (finish == kFlushBufFinal && tui->sync_output_active) {
+    static const char sync_end[] = "\x1b[?2026l";
+    memcpy(post, sync_end, sizeof sync_end);
+    post_len += sizeof sync_end - 1;
+    tui->sync_output_active = false;
+  }
+
+  // Once synchronized output has ended, or when it was not active, make the cursor
+  // visible or invisible according to the current TUI state.
+  if (!tui->sync_output_active) {
+    const char *str = NULL;
+    if (tui->is_invisible && !should_be_invisible) {
+      str = tui->ti.defs[kTerm_cursor_normal];
+      tui->is_invisible = false;
+    } else if (!tui->is_invisible && should_be_invisible) {
+      str = tui->ti.defs[kTerm_cursor_invisible];
+      tui->is_invisible = true;
+    }
+    if (str != NULL) {
+      post_len += terminfo_fmt(post + post_len, post + sizeof(post), str, null_params);
+    }
   }
 
   bufs[0].base = pre;
-  bufs[0].len = UV_BUF_LEN(flush_buf_start(tui, pre, sizeof(pre)));
+  bufs[0].len = UV_BUF_LEN(pre_len);
 
   bufs[1].base = tui->buf_to_flush != NULL ? tui->buf_to_flush : tui->buf;
   bufs[1].len = UV_BUF_LEN(tui->bufpos);
 
   bufs[2].base = post;
-  bufs[2].len = UV_BUF_LEN(flush_buf_end(tui, post, sizeof(post)));
+  bufs[2].len = UV_BUF_LEN(post_len);
 
   if (tui->screenshot) {
     for (size_t i = 0; i < ARRAY_SIZE(bufs); i++) {
       fwrite(bufs[i].base, bufs[i].len, 1, tui->screenshot);
     }
   } else {
-    int ret
-      = uv_write(&req, (uv_stream_t *)&tui->output_handle, bufs, ARRAY_SIZE(bufs), NULL);
-    if (ret) {
-      ELOG("uv_write failed: %s", uv_strerror(ret));
+    unsigned nbufs = ARRAY_SIZE(bufs);
+    while (nbufs > 0 && bufs[nbufs - 1].len == 0) {
+      nbufs--;  // Trim trailing zero-length buffers. https://github.com/libuv/libuv/issues/5182
     }
-    uv_run(&tui->write_loop, UV_RUN_DEFAULT);
+    if (nbufs > 0) {
+      int ret = uv_write(&req, (uv_stream_t *)&tui->output_handle, bufs, nbufs, NULL);
+      if (ret) {
+        ELOG("uv_write failed: %s", uv_strerror(ret));
+      }
+      uv_run(&tui->write_loop, UV_RUN_DEFAULT);
+    }
   }
   tui->buf_to_flush = NULL;
   tui->bufpos = 0;
@@ -2505,18 +2668,28 @@ static void flush_buf(TUIData *tui)
 
 /// Try to get "kbs" code from stty because "the terminfo kbs entry is extremely
 /// unreliable." (Vim, Bash, and tmux also do this.)
+/// On Windows, use 0x7f as Backspace if VT input has been enabled by stream_init().
 ///
 /// @see tmux/tty-keys.c fe4e9470bb504357d073320f5d305b22663ee3fd
 /// @see https://bugzilla.redhat.com/show_bug.cgi?id=142659
-static const char *tui_get_stty_erase(int fd)
+/// @see https://github.com/microsoft/terminal/issues/4949
+static const char *tui_get_stty_erase(TermInput *input)
 {
   static char stty_erase[2] = { 0 };
-#if defined(HAVE_TERMIOS_H)
+#ifdef HAVE_TERMIOS_H
   struct termios t;
-  if (tcgetattr(fd, &t) != -1) {
+  if (tcgetattr(input->in_fd, &t) != -1) {
     stty_erase[0] = (char)t.c_cc[VERASE];
     stty_erase[1] = NUL;
     DLOG("stty/termios:erase=%s", stty_erase);
+  }
+#elif defined(MSWIN)
+  DWORD dwMode;
+  if (((uv_handle_t *)&input->read_stream.s.uv)->type == UV_TTY
+      && GetConsoleMode(input->read_stream.s.uv.tty.handle, &dwMode)
+      && (dwMode & ENABLE_VIRTUAL_TERMINAL_INPUT)) {
+    stty_erase[0] = '\x7f';
+    stty_erase[1] = NUL;
   }
 #endif
   return stty_erase;
@@ -2529,7 +2702,7 @@ static const char *tui_tk_ti_getstr(const char *name, const char *value, void *d
   TermInput *input = data;
   static const char *stty_erase = NULL;
   if (stty_erase == NULL) {
-    stty_erase = tui_get_stty_erase(input->in_fd);
+    stty_erase = tui_get_stty_erase(input);
   }
 
   if (strequal(name, "key_backspace")) {

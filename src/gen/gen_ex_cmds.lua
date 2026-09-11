@@ -1,3 +1,4 @@
+---@diagnostic disable: no-unknown
 -- Will generate files ex_cmds_enum.generated.h with cmdidx_T enum
 -- and ex_cmds_defs.generated.h with main Ex commands definitions.
 
@@ -5,8 +6,8 @@ local enumfname = arg[1] -- '/ex_cmds_enum.generated.h'
 local defsfname = arg[2] -- '/ex_cmds_defs.generated.h'
 local ex_cmds_name = arg[3] -- 'ex_cmds.lua'
 
-local enumfile = io.open(enumfname, 'w')
-local defsfile = io.open(defsfname, 'w')
+local enumfile = assert(io.open(enumfname, 'w'))
+local defsfile = assert(io.open(defsfname, 'w'))
 
 local bit = require 'bit'
 local ex_cmds = loadfile(ex_cmds_name)()
@@ -113,6 +114,12 @@ for _, cmd in ipairs(defs) do
     assert(
       cmd.preview_func ~= nil,
       string.format('ex_cmds.lua:%s: Missing preview_func\n', cmd.command)
+    )
+  end
+  if bit.band(cmd.flags, flags.BUFLOCK_OK) == flags.BUFLOCK_OK then
+    assert(
+      bit.band(cmd.flags, flags.LOCK_OK) == flags.LOCK_OK,
+      string.format('ex_cmds.lua:%s: BUFLOCK_OK implies LOCK_OK\n', cmd.command)
     )
   end
   local enumname = cmd.enum or ('CMD_' .. cmd.command)

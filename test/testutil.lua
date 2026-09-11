@@ -1,14 +1,23 @@
-local luaassert = require('luassert')
-local busted = require('busted')
+local test_assert = require('test.assert')
+---@type test.harness
+local harness = require('test.harness')
 local uv = vim.uv
 local Paths = require('test.cmakeconfig.paths')
-
-luaassert:set_parameter('TableFormatLevel', 100)
 
 --- Functions executing in the context of the test runner (not the current nvim test session).
 --- @class test.testutil
 local M = {
   paths = Paths,
+
+  -- Test framework:
+  after_each = harness.after_each,
+  before_each = harness.before_each,
+  describe = harness.describe,
+  finally = harness.finally,
+  it = harness.it,
+  pending = harness.pending,
+  setup = harness.setup,
+  teardown = harness.teardown,
 }
 
 --- @param path string
@@ -49,7 +58,7 @@ function M.fix_slashes(obj)
 end
 
 --- @param ... string|string[]
---- @return string
+--- @return string[]
 function M.argss_to_cmd(...)
   local cmd = {} --- @type string[]
   for i = 1, select('#', ...) do
@@ -73,8 +82,8 @@ end
 --- @param fn function
 --- @return any
 function M.retry(max, max_ms, fn)
-  luaassert(max == nil or max > 0)
-  luaassert(max_ms == nil or max_ms > 0)
+  assert(max == nil or max > 0)
+  assert(max_ms == nil or max_ms > 0)
   local tries = 1
   local timeout = (max_ms and max_ms or 10000)
   local start_time = uv.now()
@@ -86,7 +95,7 @@ function M.retry(max, max_ms, fn)
     end
     uv.update_time() -- Update cached value of luv.now() (libuv: uv_now()).
     if (max and tries >= max) or (uv.now() - start_time > timeout) then
-      busted.fail(string.format('retry() attempts: %d\n%s', tries, tostring(result)), 2)
+      error(string.format('retry() attempts: %d\n%s', tries, tostring(result)), 2)
     end
     tries = tries + 1
     uv.sleep(20) -- Avoid hot loop...
@@ -100,10 +109,15 @@ local check_logs_useless_lines = {
 }
 
 function M.eq(expected, actual, context)
-  return luaassert.are.same(expected, actual, context)
+  return test_assert.eq(expected, actual, context)
 end
 function M.neq(expected, actual, context)
-  return luaassert.are_not.same(expected, actual, context)
+  return test_assert.neq(expected, actual, context)
+end
+
+--- Compare paths after resolving symlinks with realpath.
+function M.eq_paths(expected, actual, context)
+  return M.eq(uv.fs_realpath(expected), uv.fs_realpath(actual), context)
 end
 
 --- Asserts that `cond` is true, or prints a message.
@@ -112,32 +126,37 @@ end
 --- @param expected (any) description of expected result
 --- @param actual (any) description of actual result
 function M.ok(cond, expected, actual)
-  luaassert(
+  assert(
     (not expected and not actual) or (expected and actual),
     'if "expected" is given, "actual" is also required'
   )
   local msg = expected and ('expected %s, got: %s'):format(expected, tostring(actual)) or nil
-  return luaassert(cond, msg)
-end
-
-local function epicfail(state, arguments, _)
-  state.failure_message = arguments[1]
-  return false
-end
-luaassert:register('assertion', 'epicfail', epicfail)
-function M.fail(msg)
-  return luaassert.epicfail(msg)
+  return assert(cond, msg)
 end
 
 --- @param pat string
 --- @param actual string
+--- @param plain boolean? (default: false)
 --- @return boolean
-function M.matches(pat, actual)
+function M.matches(pat, actual, plain)
   assert(pat and pat ~= '', 'pat must be a non-empty string')
-  if nil ~= string.match(actual, pat) then
+  assert(plain == nil or type(plain) == 'boolean', 'plain must be nil or boolean')
+  if nil ~= string.find(actual, pat, 1, plain) then
     return true
   end
-  error(string.format('Pattern does not match.\nPattern:\n%s\nActual:\n%s', pat, actual))
+  error(('Pattern does not match.\nPattern:\n%s\nActual:\n%s'):format(pat, actual))
+end
+
+--- @param pat string
+--- @param actual string
+--- @param plain boolean? (default: false)
+--- @return boolean
+function M.not_matches(pat, actual, plain)
+  assert(pat and pat ~= '', 'pat must be a non-empty string')
+  if nil == string.find(actual, pat, 1, plain) then
+    return true
+  end
+  error(('Pattern does match.\nPattern:\n%s\nActual:\n%s'):format(pat, actual))
 end
 
 --- Asserts that `pat` matches (or *not* if inverse=true) any text in the tail of `logfile`.
@@ -151,8 +170,8 @@ end
 ---@param nrlines? (number) Search up to this many log lines (default 10)
 ---@param inverse? (boolean) Assert that the pattern does NOT match.
 function M.assert_log(pat, logfile, nrlines, inverse)
-  logfile = logfile or os.getenv('NVIM_LOG_FILE') or '.nvimlog'
-  luaassert(logfile ~= nil, 'no logfile')
+  logfile = logfile or os.getenv('NVIM_LOG_FILE') or 'nvim.log'
+  assert(logfile ~= nil, 'no logfile')
   nrlines = nrlines or 10
 
   M.retry(nil, 1000, function()
@@ -161,7 +180,7 @@ function M.assert_log(pat, logfile, nrlines, inverse)
     local ismatch = not not text:match(pat)
     if (ismatch and inverse) or not (ismatch or inverse) then
       local msg = string.format(
-        'Pattern %s %sfound in log (last %d lines): %s:\n%s',
+        'Pattern %s %sfound in log (last %d lines): %q:\n%s',
         vim.inspect(pat),
         (inverse and '' or 'not '),
         nrlines,
@@ -187,7 +206,7 @@ end
 --- @param ... any
 --- @return boolean, any
 function M.pcall(fn, ...)
-  luaassert(type(fn) == 'function')
+  assert(type(fn) == 'function')
   local status, rv = pcall(fn, ...)
   if status then
     return status, rv
@@ -236,7 +255,7 @@ end
 --- @param fn function
 --- @return string
 function M.pcall_err_withfile(fn, ...)
-  luaassert(type(fn) == 'function')
+  assert(type(fn) == 'function')
   local status, rv = M.pcall(fn, ...)
   if status == true then
     error('expected failure, but got success')
@@ -316,53 +335,84 @@ function M.glob(initial_path, re, exc_re)
   return ret
 end
 
+--- Reads sanitizer/valgrind log file lines, filtering out useless warnings.
+--- Waits briefly for the ASAN "SUMMARY" line so we don't read a truncated report
+--- (the crashing process may still be writing when we check).
+local function read_sanitizer_log(file)
+  local lines = {} --- @type string[]
+  local has_summary = false
+  -- Poll for up to 2 seconds for the log to be complete.
+  for _ = 1, 20 do
+    lines = {}
+    local warning_line = 0
+    local fd = assert(io.open(file))
+    for line in fd:lines() do
+      local cur_warning_line = check_logs_useless_lines[line]
+      if cur_warning_line == warning_line + 1 then
+        warning_line = cur_warning_line
+      else
+        lines[#lines + 1] = line
+      end
+      if line:find('SUMMARY') then
+        has_summary = true
+      end
+    end
+    fd:close()
+    if has_summary or #lines == 0 then
+      break
+    end
+    uv.sleep(100)
+  end
+  if not has_summary and #lines > 0 then
+    lines[#lines + 1] = '(WARNING: sanitizer log may be truncated, no SUMMARY line found)'
+  end
+  return lines
+end
+
 function M.check_logs()
   local log_dir = os.getenv('LOG_DIR')
-  local runtime_errors = {}
+  local runtime_errors = {} --- @type string[]
+  local runtime_errors_detail = {} --- @type string[]
   if log_dir and M.isdir(log_dir) then
     for tail in vim.fs.dir(log_dir) do
       if tail:sub(1, 30) == 'valgrind-' or tail:find('san%.') then
-        local file = log_dir .. '/' .. tail
-        local fd = assert(io.open(file))
-        local start_msg = ('='):rep(20) .. ' File ' .. file .. ' ' .. ('='):rep(20)
-        local lines = {} --- @type string[]
-        local warning_line = 0
-        for line in fd:lines() do
-          local cur_warning_line = check_logs_useless_lines[line]
-          if cur_warning_line == warning_line + 1 then
-            warning_line = cur_warning_line
-          else
-            lines[#lines + 1] = line
-          end
-        end
-        fd:close()
+        local file = ('%s/%s'):format(log_dir, tail)
+        local lines = read_sanitizer_log(file)
         if #lines > 0 then
+          local start_msg = ('%s File %s %s'):format(('='):rep(20), file, ('='):rep(20))
+          local end_msg = select(1, start_msg:gsub('.', '='))
+          local lines_str = ('= %s'):format(table.concat(lines, '\n= '))
+          local detail = ('%s\n%s\n%s'):format(start_msg, lines_str, end_msg)
           --- @type boolean?, file*?
           local status, f
-          local out = io.stdout
           if os.getenv('SYMBOLIZER') then
             status, f = pcall(M.repeated_read_cmd, os.getenv('SYMBOLIZER'), '-l', file)
           end
+          local out = io.stdout
           out:write(start_msg .. '\n')
           if status then
             assert(f)
             for line in f:lines() do
-              out:write('= ' .. line .. '\n')
+              out:write(('= %s\n'):format(line))
             end
             f:close()
           else
-            out:write('= ' .. table.concat(lines, '\n= ') .. '\n')
+            out:write(lines_str .. '\n')
           end
-          out:write(select(1, start_msg:gsub('.', '=')) .. '\n')
+          out:write(end_msg .. '\n')
           table.insert(runtime_errors, file)
+          table.insert(runtime_errors_detail, detail)
         end
         os.remove(file)
       end
     end
   end
-  luaassert(
+  test_assert(
     0 == #runtime_errors,
-    string.format('Found runtime errors in logfile(s): %s', table.concat(runtime_errors, ', '))
+    string.format(
+      'Found runtime errors in logfile(s):\n%s',
+      table.concat(runtime_errors_detail, '\n')
+    )
   )
 end
 
@@ -388,10 +438,10 @@ end
 
 local architecture = uv.os_uname().machine
 
---- @param s 'x86_64'|'arm64'
+--- @param s 'x86_64'|'arm64'|'s390x'
 --- @return boolean
 function M.is_arch(s)
-  if not (s == 'x86_64' or s == 'arm64') then
+  if not (s == 'x86_64' or s == 'arm64' or s == 's390x') then
     error('unknown architecture: ' .. tostring(s))
   end
   return s == architecture
@@ -646,6 +696,29 @@ function M.concat_tables(...)
   return ret
 end
 
+--- Get all permutations of an array.
+---
+--- @param arr any[]
+--- @return any[][]
+function M.permutations(arr)
+  local res = {} --- @type any[][]
+  --- @param a any[]
+  --- @param n integer
+  local function gen(a, n)
+    if n == 0 then
+      res[#res + 1] = M.shallowcopy(a)
+      return
+    end
+    for i = 1, n do
+      a[n], a[i] = a[i], a[n]
+      gen(a, n - 1)
+      a[n], a[i] = a[i], a[n]
+    end
+  end
+  gen(M.shallowcopy(arr), #arr)
+  return res
+end
+
 --- @param str string
 --- @param leave_indent? integer
 --- @return string
@@ -713,9 +786,9 @@ function M.read_file_list(filename, start)
   local i = 1
   local line = file:read('*l')
   while line ~= nil do
-    if i >= start then
+    if i >= lnum then
       table.insert(lines, line)
-      if #lines > maxlines then
+      if maxlines and #lines > maxlines then
         table.remove(lines, 1)
       end
     end
@@ -758,36 +831,18 @@ function M.write_file(name, text, no_dedent, append)
   file:close()
 end
 
---- @param name? 'cirrus'|'github'
+--- @param name? 'github'
 --- @return boolean
 function M.is_ci(name)
-  local any = (name == nil)
-  luaassert(any or name == 'github' or name == 'cirrus')
-  local gh = ((any or name == 'github') and nil ~= os.getenv('GITHUB_ACTIONS'))
-  local cirrus = ((any or name == 'cirrus') and nil ~= os.getenv('CIRRUS_CI'))
-  return gh or cirrus
+  return harness.is_ci(name)
 end
 
 -- Gets the (tail) contents of `logfile`.
 -- Also moves the file to "${NVIM_LOG_FILE}.displayed" on CI environments.
 function M.read_nvim_log(logfile, ci_rename)
-  logfile = logfile or os.getenv('NVIM_LOG_FILE') or '.nvimlog'
-  local is_ci = M.is_ci()
-  local keep = is_ci and 100 or 10
-  local lines = M.read_file_list(logfile, -keep) or {}
-  local log = (
-    ('-'):rep(78)
-    .. '\n'
-    .. string.format('$NVIM_LOG_FILE: %s\n', logfile)
-    .. (#lines > 0 and '(last ' .. tostring(keep) .. ' lines)\n' or '(empty)\n')
-  )
-  for _, line in ipairs(lines) do
-    log = log .. line .. '\n'
-  end
-  log = log .. ('-'):rep(78) .. '\n'
-  if is_ci and ci_rename then
-    os.rename(logfile, logfile .. '.displayed')
-  end
+  logfile = logfile or os.getenv('NVIM_LOG_FILE') or 'nvim.log'
+  local log = harness.read_nvim_log(logfile, ci_rename)
+  assert(log, ('logfile not found: %q'):format(logfile))
   return log
 end
 
@@ -814,7 +869,7 @@ function M.expect_events(expected, received, kind)
     for _, e in ipairs(expected) do
       msg = msg .. '  ' .. vim.inspect(e) .. ';\n'
     end
-    M.fail(msg)
+    error(msg, 2)
   end
   return received
 end
@@ -824,9 +879,7 @@ end
 --- @return boolean
 function M.skip(cond, reason)
   if cond then
-    --- @type fun(reason: string)
-    local pending = getfenv(2).pending
-    pending(reason or 'FIXME')
+    M.pending(reason or 'FIXME')
     return true
   end
   return false
@@ -850,6 +903,76 @@ end
 
 function M.translations_enabled()
   return M.paths.translations_enabled
+end
+
+--- Sorts timing `samples` and prints + returns min/q25/median/q75/max/mean.
+---
+--- Shared reporter for `test/benchmark/`. Pair it with `M.bench()` (in-process) or `n.bench()`
+--- (Nvim-under-test), or call it directly with samples you collected yourself.
+---
+--- @param samples number[]  Per-iteration durations, in nanoseconds. Sorted in place.
+--- @param opts? { label?: string, unit?: 'ms'|'us' }
+--- @return { n: integer, min: number, q25: number, median: number, q75: number, max: number, mean: number }
+function M.bench_report(samples, opts)
+  opts = opts or {}
+  local n = #samples
+  assert(n > 0, 'bench_report: no samples')
+  local unit = opts.unit or 'ms'
+  local scale = unit == 'us' and 1e3 or 1e6
+
+  table.sort(samples)
+  local sum = 0
+  for _, v in ipairs(samples) do
+    sum = sum + v
+  end
+  --- @param p number percentile in [0,1]
+  local function pct(p)
+    return samples[math.max(1, math.min(n, 1 + math.floor(n * p)))] / scale
+  end
+  local stats = {
+    n = n,
+    min = samples[1] / scale,
+    q25 = pct(0.25),
+    median = pct(0.5),
+    q75 = pct(0.75),
+    max = samples[n] / scale,
+    mean = (sum / n) / scale,
+  }
+
+  print(
+    ('\n%smin %.4f  q25 %.4f  median %.4f  q75 %.4f  max %.4f  mean %.4f  (%s, n=%d)'):format(
+      opts.label and (opts.label .. '\n  ') or '',
+      stats.min,
+      stats.q25,
+      stats.median,
+      stats.q75,
+      stats.max,
+      stats.mean,
+      unit,
+      n
+    )
+  )
+  return stats
+end
+
+--- Benchmarks `fn` in the test-runner process: runs it `opts.n` times, timing each run, then reports.
+---
+--- Note: see `testnvim.bench()` to run in the Nvim-under-test.
+---
+--- @param fn fun()
+--- @param opts { n: integer, label?: string, unit?: 'ms'|'us', warmup?: integer }
+--- @return table stats  See `M.bench_report()`.
+function M.bench(fn, opts)
+  for _ = 1, (opts.warmup or 0) do
+    fn()
+  end
+  local samples = {} --- @type number[]
+  for i = 1, opts.n do
+    local t0 = uv.hrtime()
+    fn()
+    samples[i] = uv.hrtime() - t0
+  end
+  return M.bench_report(samples, opts)
 end
 
 return M

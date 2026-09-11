@@ -2,6 +2,8 @@ local t = require('test.testutil')
 local n = require('test.functional.testnvim')()
 local Screen = require('test.functional.ui.screen')
 
+local describe, it, before_each, after_each, setup, teardown, finally =
+  t.describe, t.it, t.before_each, t.after_each, t.setup, t.teardown, t.finally
 local feed = n.feed
 local clear = n.clear
 local command = n.command
@@ -2316,7 +2318,7 @@ it('diff mode inline highlighting', function()
 
   command('set diffopt=internal,filler diffopt+=inline:word')
   screen:expect([[
-    {7:  }{27:^abcdef}{4: }{27:ghi}{4: }{27:jk}{4: n }│{7:  }{27:aBcef}{4: }{27:gHi}{4: }{27:lm}{4: n  }|
+    {7:  }{27:^abcdef ghi jk}{4: n }│{7:  }{27:aBcef gHi lm}{4: n  }|
     {7:  }{22:x               }│{7:  }{23:----------------}|
     {7:  }y               │{7:  }y               |
     {7:  }{23:----------------}│{7:  }{22:z               }|
@@ -2497,7 +2499,7 @@ it('diff mode inline highlighting', function()
   )
   command('set diffopt=internal,filler diffopt+=inline:word')
   screen:expect([[
-    {7:  }{4:^🚀}{27:⛵️}{4:一二}{27:三}{4:ひら}{100:が}{4:な}{27:Δέλτα}{4: }{27:Δelta}{4: fooba}│{7:  }{4:🚀}{27:🛸}{4:一二}{27:四}{4:ひらな}{27:δέλτα}{4: }{27:δelta}{4: foobar }|
+    {7:  }{4:^🚀}{27:⛵️}{4:一二}{27:三}{4:ひら}{27:がなΔέλτα Δelta}{4: fooba}│{7:  }{4:🚀}{27:🛸}{4:一二}{27:四}{4:ひら}{27:なδέλτα δelta}{4: foobar }|
     {1:~                                    }│{1:~                                    }|*17
     {3:Xdifile1                              }{2:Xdifile2                             }|
                                                                                |
@@ -2573,9 +2575,9 @@ it('diff mode inline highlighting', function()
   ]])
   command('set diffopt=internal,filler diffopt+=inline:word,iwhite')
   screen:expect([[
-    {7:  }{4:^this   is             }│{7:  }{4:this is }{27:some}{4: }{27:test}{4:     }|
-    {7:  }{27:sometest}{4: }{27:text}{4: }{27:foo}{4:     }│{7:  }{27:texts}{4:                 }|
-    {7:  }{27:baz}{4: }{27:abc}{4: }{27:def}{4:           }│{7:  }{27:foo}{4: }{27:bar}{4: }{27:abX}{4: }{27:Yef}{4:       }|
+    {7:  }{4:^this   is             }│{7:  }{4:this is }{27:some test}{4:     }|
+    {7:  }{27:sometest text foo}{4:     }│{7:  }{27:texts}{4:                 }|
+    {7:  }{27:baz abc def}{4:           }│{7:  }{27:foo bar abX}{4: }{27:Yef}{4:       }|
     {7:  }{27:one}{4:                   }│{7:  }{27:oneword}{4: another word  }|
     {7:  }{27:word}{4: another word     }│{7:  }{23:----------------------}|
     {7:  }{22:additional line       }│{7:  }{23:----------------------}|
@@ -2597,9 +2599,9 @@ it('diff mode inline highlighting', function()
   ]])
   command('set diffopt=internal,filler diffopt+=inline:word,iwhiteeol')
   screen:expect([[
-    {7:  }{4:^this }{100:  }{4:is             }│{7:  }{4:this is }{27:some}{4: }{27:test}{4:     }|
-    {7:  }{27:sometest}{4: }{27:text}{4: foo     }│{7:  }{27:texts}{4:                 }|
-    {7:  }{27:baz}{4: }{27:abc}{4: }{27:def}{4:           }│{7:  }{4:foo }{27:bar}{4: }{27:abX}{4: }{27:Yef}{4:       }|
+    {7:  }{4:^this }{100:  }{4:is             }│{7:  }{4:this is }{27:some test}{4:     }|
+    {7:  }{27:sometest text}{4: foo     }│{7:  }{27:texts}{4:                 }|
+    {7:  }{27:baz abc def}{4:           }│{7:  }{4:foo }{27:bar abX Yef}{4:       }|
     {7:  }{27:one}{4:                   }│{7:  }{27:oneword}{4: another word  }|
     {7:  }{27:word}{4: another word     }│{7:  }{23:----------------------}|
     {7:  }{22:additional line       }│{7:  }{23:----------------------}|
@@ -2765,7 +2767,7 @@ it('diff mode inline highlighting with 3 buffers', function()
   command('set iskeyword+=+ | 2wincmd w | set iskeyword+=- | 1wincmd w')
   command('set diffopt=internal,filler diffopt+=inline:word')
   local s4 = [[
-    {7:  }{27:^This+is}{4:=}{27:a}{4:-setence      }│{7:  }{27:This+is}{4:=}{27:another}{4:-setenc}│{7:  }{27:That+is}{4:=}{27:a}{4:-setence     }|
+    {7:  }{27:^This+is=a}{4:-setence      }│{7:  }{27:This+is=another}{4:-setenc}│{7:  }{27:That+is=a}{4:-setence     }|
     {1:~                        }│{1:~                       }│{1:~                       }|*17
     {3:Xdifile1                  }{2:Xdifile2                 Xdifile3                }|
                                                                                |
@@ -3349,4 +3351,80 @@ describe("'diffanchors'", function()
                                       |
     ]])
   end)
+end)
+
+-- oldtest: Test_diffexpr_wipe_buffers()
+it(':%bwipe does not crash when using diffexpr', function()
+  local screen = Screen.new(70, 20)
+  exec([[
+    func DiffFuncExpr()
+      let in = readblob(v:fname_in)
+      let new = readblob(v:fname_new)
+      let out = v:lua.vim.text.diff(in, new)
+      call writefile(split(out, "\n"), v:fname_out)
+    endfunc
+
+    new
+    vnew
+    set diffexpr=DiffFuncExpr()
+    wincmd l
+    new
+    call setline(1,range(20))
+    windo diffthis
+    wincmd w
+    hide
+    %bw!
+  ]])
+  screen:expect([[
+    ^                                                                      |
+    {1:~                                                                     }|*18
+    4 buffers wiped out                                                   |
+  ]])
+end)
+
+-- oldtest: Test_diffput_to_empty_buf()
+it(':diffput to empty buffer redraws properly', function()
+  local screen = Screen.new(75, 20)
+  exec([[
+    set ruler
+    call setline(1, ['foo', 'bar', 'baz'])
+    rightbelow vnew
+    windo diffthis
+    windo set cursorline nofoldenable
+    wincmd t
+  ]])
+  screen:add_extra_attr_ids({
+    [100] = { underline = true, background = Screen.colors.LightBlue },
+  })
+  screen:expect([[
+    {7:  }{100:^foo                                }│{7:  }{23:-----------------------------------}|
+    {7:  }{22:bar                                }│{7:  }{23:-----------------------------------}|
+    {7:  }{22:baz                                }│{7:  }{23:-----------------------------------}|
+    {1:~                                    }│{7:  }{21:                                   }|
+    {1:~                                    }│{1:~                                    }|*14
+    {3:[No Name] [+]      1,1            All }{2:[No Name]          0,0-1          All}|
+                                                                               |
+  ]])
+  feed('0') -- Trigger an initial 'cursorbind' check.
+  screen:expect_unchanged()
+  command('diffput')
+  screen:expect([[
+    {7:  }{21:^foo                                }│{7:  }foo                                |
+    {7:  }bar                                │{7:  }bar                                |
+    {7:  }baz                                │{7:  }{21:baz                                }|
+    {1:~                                    }│{1:~                                    }|*15
+    {3:[No Name] [+]      1,1            All }{2:[No Name] [+]      3,1            All}|
+                                                                               |
+  ]])
+  command(':redraw!')
+  screen:expect_unchanged()
+  feed('j')
+  screen:expect([[
+    {7:  }foo                                │{7:  }foo                                |
+    {7:  }{21:^bar                                }│{7:  }{21:bar                                }|
+    {7:  }baz                                │{7:  }baz                                |
+    {1:~                                    }│{1:~                                    }|*15
+    {3:[No Name] [+]      2,1            All }{2:[No Name] [+]      2,1            All}|
+                                                                               |
+  ]])
 end)

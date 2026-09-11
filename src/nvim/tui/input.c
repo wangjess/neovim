@@ -129,9 +129,11 @@ void tinput_init(TermInput *input, Loop *loop, TerminfoEntry *ti)
   input->loop = loop;
   input->paste = 0;
   input->in_fd = STDIN_FILENO;
-  input->key_encoding = kKeyEncodingLegacy;
   input->ttimeout = (bool)p_ttimeout;
   input->ttimeoutlen = p_ttm;
+
+  // setup input handle
+  rstream_init_fd(loop, &input->read_stream, input->in_fd);
 
   for (size_t i = 0; i < ARRAY_SIZE(kitty_key_map_entry); i++) {
     pmap_put(int)(&kitty_key_map, kitty_key_map_entry[i].key, (ptr_t)kitty_key_map_entry[i].name);
@@ -145,9 +147,6 @@ void tinput_init(TermInput *input, Loop *loop, TerminfoEntry *ti)
 
   int curflags = termkey_get_canonflags(input->tk);
   termkey_set_canonflags(input->tk, curflags | TERMKEY_CANON_DELBS);
-
-  // setup input handle
-  rstream_init_fd(loop, &input->read_stream, input->in_fd);
 
   // initialize a timer handle for handling ESC with libtermkey
   uv_timer_init(&loop->uv, &input->timer_handle);
@@ -687,10 +686,35 @@ static void handle_unknown_csi(TermInput *input, const TermKeyKey *key)
   uint8_t initial = (cmd >> 8) & 0xFF;
   uint8_t command = cmd & 0xFF;
 
-  // Currently unused
-  (void)intermediate;
-
   switch (command) {
+  case 'q':
+    if (initial == '>' && intermediate == ' ') {
+      // Kitty multiple-cursors protocol query response:
+      //   CSI > shape;shape;… SP q
+      MAXSIZE_TEMP_ARRAY(args, 2);
+      ADD_C(args, STATIC_CSTR_AS_OBJ("termresponse"));
+
+      StringBuilder response = KV_INITIAL_VALUE;
+      kv_concat(response, "\x1b[>");
+      for (size_t i = 0; i < nparams; i++) {
+        int arg;
+        if (termkey_interpret_csi_param(params[i], &arg, NULL, NULL) != TERMKEY_RES_KEY) {
+          kv_destroy(response);
+          return;
+        }
+        kv_printf(response, "%d", arg);
+        if (i < nparams - 1) {
+          kv_push(response, ';');
+        }
+      }
+      kv_concat(response, " q");
+      ADD_C(args, STRING_OBJ(cbuf_as_string(response.items, response.size)));
+
+      // Forward to the client (TermResponse).
+      rpc_send_event(ui_client_channel_id, "nvim_ui_term_event", args);
+      kv_destroy(response);
+    }
+    break;
   case 'u':
     switch (initial) {
     case '?':
@@ -727,7 +751,31 @@ static void handle_unknown_csi(TermInput *input, const TermKeyKey *key)
     break;
   case 'n':
     // Device Status Report (DSR)
-    if (nparams == 2) {
+    if (nparams == 1) {
+      // ECMA-48 DSR
+      // https://ecma-international.org/wp-content/uploads/ECMA-48_5th_edition_june_1991.pdf
+      int arg;
+      if (termkey_interpret_csi_param(params[0], &arg, NULL, NULL) != TERMKEY_RES_KEY) {
+        return;
+      }
+
+      MAXSIZE_TEMP_ARRAY(args, 2);
+      ADD_C(args, STATIC_CSTR_AS_OBJ("termresponse"));
+
+      StringBuilder response = KV_INITIAL_VALUE;
+      kv_printf(response, "\x1b[%dn", arg);
+      ADD_C(args, STRING_OBJ(cbuf_as_string(response.items, response.size)));
+
+      rpc_send_event(ui_client_channel_id, "nvim_ui_term_event", args);
+      kv_destroy(response);
+    } else if (nparams == 2) {
+      // Hard to find comprehensive docs on these responses. Some can be found at https://www.xfree86.org/current/ctlseqs.html
+      // under "Device Status Report (DSR, DEC-specific)"
+      // - Report Printer status
+      // - Report User Defined Key status
+      // - Report Locator status
+      // When the first parameter is 997, it's a theme update response based on
+      // contour terminal VT extensions, as described below.
       int args[2];
       for (size_t i = 0; i < ARRAY_SIZE(args); i++) {
         if (termkey_interpret_csi_param(params[i], &args[i], NULL, NULL) != TERMKEY_RES_KEY) {
@@ -741,7 +789,7 @@ static void handle_unknown_csi(TermInput *input, const TermKeyKey *key)
         // The second argument tells us whether the OS theme is set to light
         // mode or dark mode, but all we care about is the background color of
         // the terminal emulator. We query for that with OSC 11 and the response
-        // is handled by the autocommand created in _defaults.lua. The terminal
+        // is handled by the autocommand created in _core/defaults.lua. The terminal
         // may send us multiple notifications all at once so we use a timer to
         // coalesce the queries.
         if (uv_timer_get_due_in(&input->bg_query_timer) > 0) {

@@ -22,9 +22,7 @@ endfunc
 " 2. packages
 " 3. plugins in after directories
 func Test_after_comes_later()
-  if !has('packages')
-    return
-  endif
+  CheckFeature packages
   let before =<< trim [CODE]
     set nocp viminfo+=nviminfo
     set guioptions+=M
@@ -46,14 +44,14 @@ func Test_after_comes_later()
     quit
   [CODE]
 
-  call mkdir('Xhere/plugin', 'p')
+  call mkdir('Xhere/plugin', 'pR')
   call writefile(['let g:sequence .= "here "'], 'Xhere/plugin/here.vim')
-  call mkdir('Xanother/plugin', 'p')
+  call mkdir('Xanother/plugin', 'pR')
   call writefile(['let g:sequence .= "another "'], 'Xanother/plugin/another.vim')
   call mkdir('Xhere/pack/foo/start/foobar/plugin', 'p')
   call writefile(['let g:sequence .= "pack "'], 'Xhere/pack/foo/start/foobar/plugin/foo.vim')
 
-  call mkdir('Xdir/after/plugin', 'p')
+  call mkdir('Xdir/after/plugin', 'pR')
   call writefile(['let g:sequence .= "after "'], 'Xdir/after/plugin/later.vim')
 
   if RunVim(before, after, '')
@@ -75,15 +73,40 @@ func Test_after_comes_later()
 
   call delete('Xtestout')
   call delete('Xsequence')
-  call delete('Xhere', 'rf')
-  call delete('Xanother', 'rf')
-  call delete('Xdir', 'rf')
+endfunc
+
+func Test_vim_did_init()
+  let before =<< trim [CODE]
+    set nocp viminfo+=nviminfo
+    set guioptions+=M
+    set loadplugins
+    set rtp=Xhere
+    set nomore
+  [CODE]
+
+  let after =<< trim [CODE]
+    redir! > Xtestout
+    echo g:var_vimrc
+    echo g:var_plugin
+    redir END
+    quit
+  [CODE]
+
+  call writefile(['let g:var_vimrc=v:vim_did_init'], 'Xvimrc', 'D')
+  call mkdir('Xhere/plugin', 'pR')
+  call writefile(['let g:var_plugin=v:vim_did_init'], 'Xhere/plugin/here.vim')
+
+  if RunVim(before, after, '-u Xvimrc')
+    let lines = readfile('Xtestout')
+    call assert_equal('0', lines[1])
+    call assert_equal('1', lines[2])
+  endif
+
+  call delete('Xtestout')
 endfunc
 
 func Test_pack_in_rtp_when_plugins_run()
-  if !has('packages')
-    return
-  endif
+  CheckFeature packages
   let before =<< trim [CODE]
     set nocp viminfo+=nviminfo
     set guioptions+=M
@@ -599,7 +622,7 @@ func Test_invalid_args()
     endfor
   endif
 
-  if has('gui_gtk')
+  if has('gui_gtk') && has("xterm_clipboard")
     let out = split(system(GetVimCommand() .. ' --display'), "\n")
     call assert_equal(1, v:shell_error)
     call assert_match('^VIM - Vi IMproved .* (.*)$',         out[0])
@@ -812,6 +835,7 @@ func Test_issue_3969()
 endfunc
 
 func Test_start_with_tabs()
+  CheckScreendump
   CheckRunVimInTerminal
 
   let buf = RunVimInTerminal('-p a b c', {})
@@ -1164,7 +1188,8 @@ endfunc
 " Test for the "-E" (improved Ex mode) argument
 func Test_E_arg()
   let after =<< trim [CODE]
-    call assert_equal('cv', mode(1))
+    " Nvim: "-E" enters the cmdwin REPL after startup scripts; mode()="n".
+    call assert_equal('n', mode(1))
     call writefile(v:errors, 'Xtestout')
     qall
   [CODE]
@@ -1333,7 +1358,7 @@ func Test_cq_zero_exmode()
   let logfile = 'Xcq_log.txt'
   let out = system(GetVimCommand() .. ' --clean --log ' .. logfile .. ' -es -X -c "argdelete foobar" -c"7cq"')
   call assert_equal(8, v:shell_error)
-  let log = filter(readfile(logfile), {idx, val -> val =~ "E480"})
+  let log = filter(readfile(logfile), {idx, val -> val =~ "E480:"})
   call assert_match('E480: No match: foobar', log[0])
   call delete(logfile)
 
@@ -1344,7 +1369,7 @@ func Test_cq_zero_exmode()
   else
     call assert_equal(256, v:shell_error)
   endif
-  let log = filter(readfile(logfile), {idx, val -> val =~ "E480"})
+  let log = filter(readfile(logfile), {idx, val -> val =~ "E480:"})
   call assert_match('E480: No match: foobar', log[0])
   call delete('Xcq_log.txt')
 endfunc

@@ -53,7 +53,8 @@ endfunc
 
 func Test_help_errors()
   call assert_fails('help doesnotexist', 'E149:')
-  call assert_fails('help!', 'E478:')
+  " Nvim: `:help!` is DWIM, not an error.
+  " call assert_fails('help!', 'E478:')
   if has('multi_lang')
     call assert_fails('help help@xy', 'E661:')
   endif
@@ -72,6 +73,13 @@ func Test_help_errors()
   call setline(1, "   ")
   call assert_fails('normal VK', 'E349:')
   bwipe!
+endfunc
+
+func Test_helpclose_errors()
+  call assert_fails('42helpclose', 'E481:')
+  call assert_fails('helpclose 42', 'E488:')
+  call assert_fails('helpclose foo', 'E488:')
+  call assert_fails('helpclose!', 'E477:')
 endfunc
 
 func Test_help_expr()
@@ -100,8 +108,8 @@ func Test_help_local_additions()
   help local-additions
   let lines = getline(line(".") + 1, search("^$") - 1)
   call assert_equal([
-  \ '|mydoc-ext.txt| my extended awesome doc',
-  \ '|mydoc.txt| my awesome doc'
+  \ '|mydoc.txt|                                                     my awesome doc',
+  \ '|mydoc-ext.txt|                                        my extended awesome doc'
   \ ], lines)
   call delete('Xruntime/doc/mydoc-ext.txt')
   close
@@ -117,17 +125,17 @@ func Test_help_local_additions()
   help local-additions@en
   let lines = getline(line(".") + 1, search("^$") - 1)
   call assert_equal([
-  \ '|mydoc.txt| my awesome doc'
+  \ '|mydoc.txt|                                                     my awesome doc'
   \ ], lines)
   close
 
   help local-additions@ja
   let lines = getline(line(".") + 1, search("^$") - 1)
   call assert_equal([
-  \ '|mydoc.txt| my awesome doc',
-  \ '|help.txt| This is jax file',
-  \ '|work.txt| This is jax file',
-  \ '|work2.txt| This is jax file',
+  \ '|help.txt|                                                    This is jax file',
+  \ '|mydoc.txt|                                                     my awesome doc',
+  \ '|work.txt|                                                    This is jax file',
+  \ '|work2.txt|                                                   This is jax file',
   \ ], lines)
   close
 
@@ -248,5 +256,59 @@ func Test_helptag_navigation()
   bw
 endfunc
 
+func Test_help_command_termination()
+  " :help {arg}
+  call execute('help |')
+  call assert_match('*bar\*', getline('.'))
+
+  " :help {arg}
+  call execute('help ||')
+  call assert_match('*expr-barbar\*', getline('.'))
+
+  " :help | <whitespace> <empty-command>
+  call execute('help | ')
+  call assert_match('*help.txt\*', getline('.'))
+
+  " :help {arg} | <whitespace> <empty-command>
+  call execute('help || ')
+  call assert_match('*bar\*', getline('.'))
+
+  " :help {arg}
+  call assert_fails('help |||', 'E149:')
+  " :help {arg} | <whitespace> <empty-command>
+  call execute('help ||| ')
+  call assert_match('*expr-barbar\*', getline('.'))
+
+  " :help {invalid-arg}
+  call assert_fails('help ||||', 'E149:')
+  " :help {invalid-arg} | <whitespace> <empty-command>
+  "   (aborted command sequence)
+  call assert_fails('help |||| ', 'E149:')
+
+  call assert_equal("nextcmd",
+        \ execute("help |     echo 'nextcmd'")->split("\n")[-1])
+  call assert_equal("nextcmd",
+        \ execute("help ||    echo 'nextcmd'")->split("\n")[-1])
+  call assert_equal("nextcmd",
+        \ execute("help \<NL> echo 'nextcmd'")->split("\n")[-1])
+  call assert_equal("nextcmd",
+        \ execute("help \<CR> echo 'nextcmd'")->split("\n")[-1])
+
+  helpclose
+endfunc
+
+" This caused a buffer overflow
+func Test_helpfile_overflow()
+  let _helpfile = &helpfile
+  let &helpfile = repeat('A', 5000)
+  help
+  helpclose
+  for i in range(4089, 4096)
+    let &helpfile = repeat('A', i) .. '/A'
+    help
+    helpclose
+  endfor
+  let &helpfile = _helpfile
+endfunc
 
 " vim: shiftwidth=2 sts=2 expandtab

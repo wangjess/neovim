@@ -6,19 +6,30 @@
 local lsp = vim.lsp
 local protocol = lsp.protocol
 local util = lsp.util
+local Capability = require('vim.lsp._capability')
 
 local api = vim.api
 
 local M = {}
 
-local augroup = api.nvim_create_augroup('nvim.lsp.diagnostic', {})
+---@class (private) vim.lsp.diagnostic.ClientState
+---@field pull_kind 'document'|'workspace' Whether diagnostics are being updated via document or workspace pull
+---@field result_id table<string, string?>  Latest responded `resultId`, keyed by `identifier`
 
----@class (private) vim.lsp.diagnostic.BufState
----@field pull_kind 'document'|'workspace'|'disabled' Whether diagnostics are being updated via document pull, workspace pull, or disabled.
----@field client_result_id table<integer, string?> Latest responded `resultId`
+---@class (private) Diagnostics : vim.lsp.Capability
+---@field active table<integer, Diagnostics>
+---@field client_state table<integer, vim.lsp.diagnostic.ClientState>
+local Diagnostics = {
+  name = 'diagnostics',
+  method = 'textDocument/diagnostic',
+  active = {},
+}
+Diagnostics.__index = Diagnostics
+setmetatable(Diagnostics, Capability)
+Capability.all[Diagnostics.name] = Diagnostics
 
----@type table<integer, vim.lsp.diagnostic.BufState>
-local bufstates = {}
+--- Diagnostics are enabled by default
+Capability.enable('diagnostics', true)
 
 local DEFAULT_CLIENT_ID = -1
 
@@ -71,6 +82,7 @@ end
 --- @return table?
 local function tags_lsp_to_vim(diagnostic, client_id)
   local tags ---@type table?
+  assert(diagnostic.tags ~= vim.NIL, 'server response has invalid (null) tags')
   for _, tag in ipairs(diagnostic.tags or {}) do
     if tag == protocol.DiagnosticTag.Unnecessary then
       tags = tags or {}
@@ -147,6 +159,12 @@ local function tags_vim_to_lsp(diagnostic)
   return tags
 end
 
+---@param identifier string?
+---@return string
+local function result_id_key(identifier)
+  return identifier or 'nil'
+end
+
 --- Converts the input `vim.Diagnostic`s to LSP diagnostics.
 --- @param diagnostics vim.Diagnostic[]
 --- @return lsp.Diagnostic[]
@@ -187,19 +205,23 @@ local client_pull_namespaces = {}
 --- Get the diagnostic namespace associated with an LSP client |vim.diagnostic| for diagnostics
 ---
 ---@param client_id integer The id of the LSP client
----@param is_pull boolean? Whether the namespace is for a pull or push client. Defaults to push
-function M.get_namespace(client_id, is_pull)
+---@param is_pull boolean? Whether the namespace is for a pull or push client. Defaults to
+---                        `false` (push).
+---@param pull_id string? (default: nil) Optional identifier for pull diagnostic providers.
+---                       Only used if `is_pull` is `true`.
+function M.get_namespace(client_id, is_pull, pull_id)
   vim.validate('client_id', client_id, 'number')
+  vim.validate('is_pull', is_pull, 'boolean', true)
+  vim.validate('pull_id', pull_id, 'string', true)
 
   local client = lsp.get_client_by_id(client_id)
   if is_pull then
-    local server_id =
-      vim.tbl_get((client or {}).server_capabilities or {}, 'diagnosticProvider', 'identifier')
-    local key = ('%d:%s'):format(client_id, server_id or 'nil')
+    pull_id = pull_id or 'nil'
+    local key = ('%d:%s'):format(client_id, pull_id)
     local name = ('nvim.lsp.%s.%d.%s'):format(
       client and client.name or 'unknown',
       client_id,
-      server_id or 'nil'
+      pull_id
     )
     local ns = client_pull_namespaces[key]
     if not ns then
@@ -221,8 +243,9 @@ end
 --- @param uri string
 --- @param client_id? integer
 --- @param diagnostics lsp.Diagnostic[]
---- @param is_pull boolean
-local function handle_diagnostics(uri, client_id, diagnostics, is_pull)
+--- @param is_pull? boolean
+--- @param pull_id? string
+local function handle_diagnostics(uri, client_id, diagnostics, is_pull, pull_id)
   local fname = vim.uri_to_fname(uri)
 
   if #diagnostics == 0 and vim.fn.bufexists(fname) == 0 then
@@ -236,7 +259,7 @@ local function handle_diagnostics(uri, client_id, diagnostics, is_pull)
 
   client_id = client_id or DEFAULT_CLIENT_ID
 
-  local namespace = M.get_namespace(client_id, is_pull)
+  local namespace = M.get_namespace(client_id, is_pull, pull_id)
 
   vim.diagnostic.set(namespace, bufnr, diagnostic_lsp_to_vim(diagnostics, bufnr, client_id))
 end
@@ -249,7 +272,9 @@ end
 ---@param params lsp.PublishDiagnosticsParams
 ---@param ctx lsp.HandlerContext
 function M.on_publish_diagnostics(_, params, ctx)
-  handle_diagnostics(params.uri, ctx.client_id, params.diagnostics, false)
+  -- TODO(tris203): if empty array then clear diags
+  -- https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/#textDocument_publishDiagnostics
+  handle_diagnostics(params.uri, ctx.client_id, params.diagnostics)
 end
 
 --- |lsp-handler| for the method "textDocument/diagnostic"
@@ -260,11 +285,22 @@ end
 ---@param result lsp.DocumentDiagnosticReport
 ---@param ctx lsp.HandlerContext
 function M.on_diagnostic(error, result, ctx)
-  if error ~= nil and error.code == protocol.ErrorCodes.ServerCancelled then
-    if error.data == nil or error.data.retriggerRequest ~= false then
-      local client = assert(lsp.get_client_by_id(ctx.client_id))
-      ---@diagnostic disable-next-line: param-type-mismatch
-      client:request(ctx.method, ctx.params, nil, ctx.bufnr)
+  local client_id = ctx.client_id
+  local bufnr = assert(ctx.bufnr)
+  local state = Diagnostics.active[bufnr] and Diagnostics.active[bufnr].client_state[client_id]
+  if not state then
+    return
+  end
+
+  if error ~= nil then
+    if error.code == protocol.ErrorCodes.ServerCancelled then
+      if error.data == nil or error.data.retriggerRequest ~= false then
+        local client = assert(lsp.get_client_by_id(client_id))
+        ---@diagnostic disable-next-line: param-type-mismatch
+        client:request(ctx.method, ctx.params, nil, ctx.bufnr)
+      end
+    else
+      lsp.log.error('diagnostics', error)
     end
     return
   end
@@ -273,192 +309,166 @@ function M.on_diagnostic(error, result, ctx)
     return
   end
 
-  local client_id = ctx.client_id
-  local bufnr = assert(ctx.bufnr)
-  local bufstate = bufstates[bufnr]
-  bufstate.client_result_id[client_id] = result.resultId
+  ---@type lsp.DocumentDiagnosticParams
+  local params = ctx.params
+  local key = result_id_key(params.identifier)
+  state.result_id[key] = result.resultId
 
   if result.kind == 'unchanged' then
     return
   end
 
-  handle_diagnostics(ctx.params.textDocument.uri, client_id, result.items, true)
+  handle_diagnostics(params.textDocument.uri, client_id, result.items, true, params.identifier)
 
   for uri, related_result in pairs(result.relatedDocuments or {}) do
     if related_result.kind == 'full' then
-      handle_diagnostics(uri, client_id, related_result.items, true)
+      handle_diagnostics(uri, client_id, related_result.items, true, params.identifier)
     end
 
+    -- Create a new client state if it doesn't exist for the related document. This will not enable
+    -- diagnostic pulling by itself, but will allow previous result IDs to be passed correctly the
+    -- next time this buffer's diagnostics are pulled.
     local related_bufnr = vim.uri_to_bufnr(uri)
-    local related_bufstate = bufstates[related_bufnr]
-      -- Create a new bufstate if it doesn't exist for the related document. This will not enable
-      -- diagnostic pulling by itself, but will allow previous result IDs to be passed correctly the
-      -- next time this buffer's diagnostics are pulled.
-      or { pull_kind = 'document', client_result_id = {} }
-    bufstates[related_bufnr] = related_bufstate
-
-    related_bufstate.client_result_id[client_id] = related_result.resultId
+    local related_diagnostics = Diagnostics.active[related_bufnr] or Diagnostics:new(related_bufnr)
+    local related_state = related_diagnostics.client_state[client_id]
+    if not related_state then
+      related_state = { pull_kind = 'document', result_id = {} }
+      related_diagnostics.client_state[client_id] = related_state
+    end
+    related_state.result_id[key] = related_result.resultId
   end
-end
-
---- Get the diagnostics by line
----
---- Marked private as this is used internally by the LSP subsystem, but
---- most users should instead prefer |vim.diagnostic.get()|.
----
----@param bufnr integer|nil The buffer number
----@param line_nr integer|nil The line number
----@param opts {severity?:lsp.DiagnosticSeverity}?
----         - severity: (lsp.DiagnosticSeverity)
----             - Only return diagnostics with this severity.
----@param client_id integer|nil the client id
----@return table Table with map of line number to list of diagnostics.
----              Structured: { [1] = {...}, [5] = {.... } }
----@private
-function M.get_line_diagnostics(bufnr, line_nr, opts, client_id)
-  vim.deprecate('vim.lsp.diagnostic.get_line_diagnostics', 'vim.diagnostic.get', '0.12')
-  local diag_opts = {} --- @type vim.diagnostic.GetOpts
-
-  if opts and opts.severity then
-    diag_opts.severity = severity_lsp_to_vim(opts.severity)
-  end
-
-  if client_id then
-    diag_opts.namespace = M.get_namespace(client_id, false)
-  end
-
-  diag_opts.lnum = line_nr or (api.nvim_win_get_cursor(0)[1] - 1)
-
-  return M.from(vim.diagnostic.get(bufnr, diag_opts))
 end
 
 --- Clear diagnostics from pull based clients
-local function clear(bufnr)
-  for _, namespace in pairs(client_pull_namespaces) do
-    vim.diagnostic.reset(namespace, bufnr)
+---@package
+---@param client_id integer?
+function Diagnostics:clear(client_id)
+  for key, namespace in pairs(client_pull_namespaces) do
+    if not client_id or vim.startswith(key, ('%d:'):format(client_id)) then
+      vim.diagnostic.reset(namespace, self.bufnr)
+    end
   end
-end
-
---- Disable pull diagnostics for a buffer
---- @param bufnr integer
-local function disable(bufnr)
-  local bufstate = bufstates[bufnr]
-  if bufstate then
-    bufstate.pull_kind = 'disabled'
-  end
-  clear(bufnr)
 end
 
 --- Refresh diagnostics, only if we have attached clients that support it
----@param bufnr integer buffer number
----@param client_id? integer Client ID to refresh (default: all clients)
----@param only_visible? boolean Whether to only refresh for the visible regions of the buffer (default: false)
-local function refresh(bufnr, client_id, only_visible)
-  if
-    only_visible
-    and vim.iter(api.nvim_list_wins()):all(function(window)
-      return api.nvim_win_get_buf(window) ~= bufnr
-    end)
-  then
-    return
-  end
+---@package
+---@param client_id integer Client ID to refresh
+function Diagnostics:refresh(client_id)
+  local client = lsp.get_client_by_id(client_id)
 
   local method = 'textDocument/diagnostic'
-  local clients = lsp.get_clients({ bufnr = bufnr, method = method, id = client_id })
-  local bufstate = bufstates[bufnr]
+  local clients = { client }
 
   util._cancel_requests({
-    bufnr = bufnr,
+    bufnr = self.bufnr,
     clients = clients,
     method = method,
     type = 'pending',
   })
-  for _, client in ipairs(clients) do
-    ---@type lsp.DocumentDiagnosticParams
-    local params = {
-      textDocument = util.make_text_document_params(bufnr),
-      previousResultId = bufstate.client_result_id[client.id],
-    }
-    client:request(method, params, nil, bufnr)
+
+  local state = self.client_state[client_id]
+  if client and state then
+    ---@param cap lsp.DiagnosticRegistrationOptions
+    client:_provider_foreach(method, function(cap)
+      local key = result_id_key(cap.identifier)
+      ---@type lsp.DocumentDiagnosticParams
+      local params = {
+        identifier = cap.identifier,
+        textDocument = util.make_text_document_params(self.bufnr),
+        previousResultId = state.result_id[key],
+      }
+      client:request(method, params, nil, self.bufnr)
+    end)
   end
 end
 
---- Enable pull diagnostics for a buffer
----@param bufnr (integer) Buffer handle, or 0 for current
-function M._enable(bufnr)
-  bufnr = vim._resolve_bufnr(bufnr)
-
-  if bufstates[bufnr] then
-    -- If we're already pulling diagnostics for this buffer, nothing to do here.
-    if bufstates[bufnr].pull_kind == 'document' then
-      return
-    end
-    -- Else diagnostics were disabled or we were using workspace diagnostics.
-    bufstates[bufnr].pull_kind = 'document'
-  else
-    bufstates[bufnr] = { pull_kind = 'document', client_result_id = {} }
+--- |lsp-handler| for the method `workspace/diagnostic/refresh`
+---@param ctx lsp.HandlerContext
+---@internal
+function M.on_refresh(err, _, ctx)
+  if err then
+    return vim.NIL
+  end
+  local client = lsp.get_client_by_id(ctx.client_id)
+  if client == nil then
+    return vim.NIL
+  end
+  if client:supports_method('workspace/diagnostic') then
+    M._workspace_diagnostics({ client_id = ctx.client_id })
   end
 
-  api.nvim_create_autocmd('LspNotify', {
-    buffer = bufnr,
-    callback = function(opts)
-      if
-        opts.data.method ~= 'textDocument/didChange'
-        and opts.data.method ~= 'textDocument/didOpen'
-      then
-        return
-      end
-      if bufstates[bufnr] and bufstates[bufnr].pull_kind == 'document' then
-        local client_id = opts.data.client_id --- @type integer?
-        refresh(bufnr, client_id, true)
-      end
-    end,
-    group = augroup,
-  })
+  -- Always refresh document-pull buffers. Workspace diagnostics only cover
+  -- buffers with pull_kind == 'workspace', so open buffers must be refreshed
+  -- individually or their diagnostics go stale until the next didChange.
+  for bufnr in pairs(client.attached_buffers or {}) do
+    local provider = Diagnostics.active[bufnr]
+    local state = provider and provider.client_state[ctx.client_id]
+    if state and state.pull_kind == 'document' then
+      provider:refresh(ctx.client_id)
+    end
+  end
 
-  api.nvim_buf_attach(bufnr, false, {
-    on_reload = function()
-      if bufstates[bufnr] and bufstates[bufnr].pull_kind == 'document' then
-        refresh(bufnr)
-      end
-    end,
-    on_detach = function()
-      disable(bufnr)
-    end,
-  })
+  return vim.NIL
+end
 
-  api.nvim_create_autocmd('LspDetach', {
-    buffer = bufnr,
-    callback = function(args)
-      local clients = lsp.get_clients({ bufnr = bufnr, method = 'textDocument/diagnostic' })
+--- Enable pull diagnostics for a buffer from a client
+---@package
+function Diagnostics:on_attach(client_id)
+  local state = self.client_state[client_id]
 
-      if
-        not vim.iter(clients):any(function(c)
-          return c.id ~= args.data.client_id
-        end)
-      then
-        disable(bufnr)
-      end
-    end,
-    group = augroup,
-  })
+  if state then
+    state.pull_kind = 'document'
+  else
+    state = { pull_kind = 'document', result_id = {} }
+    self.client_state[client_id] = state
+  end
+
+  self:refresh(client_id)
+end
+
+--- Disable pull diagnostics for a buffer from a client
+---@package
+function Diagnostics:on_detach(client_id)
+  local state = self.client_state[client_id]
+  if state then
+    self:clear(client_id)
+    self.client_state[client_id] = nil
+  end
+end
+
+---@private
+function Diagnostics:on_close(client_id)
+  local state = self.client_state[client_id]
+  if state and state.pull_kind == 'document' then
+    self:clear(client_id)
+  end
+end
+
+---@private
+function Diagnostics:on_change(client_id)
+  local state = self.client_state[client_id]
+  if state and state.pull_kind == 'document' then
+    self:refresh(client_id)
+  end
 end
 
 --- Returns the result IDs from the reports provided by the given client.
 --- @return lsp.PreviousResultId[]
-local function previous_result_ids(client_id)
+--- @param client_id integer
+--- @param identifier string?
+local function previous_result_ids(client_id, identifier)
   local results = {} ---@type lsp.PreviousResultId[]
+  local key = result_id_key(identifier)
 
-  for bufnr, state in pairs(bufstates) do
-    if state.pull_kind ~= 'disabled' then
-      for buf_client_id, result_id in pairs(state.client_result_id) do
-        if buf_client_id == client_id then
-          results[#results + 1] = {
-            uri = vim.uri_from_bufnr(bufnr),
-            value = result_id,
-          }
-          break
-        end
+  for bufnr, provider in pairs(Diagnostics.active) do
+    local state = provider.client_state[client_id]
+    if state then
+      local result_id = state.result_id[key]
+      if result_id then
+        results[#results + 1] = {
+          uri = vim.uri_from_bufnr(bufnr),
+          value = result_id,
+        }
       end
     end
   end
@@ -486,32 +496,41 @@ function M._workspace_diagnostics(opts)
     end
 
     if error == nil and result ~= nil then
+      ---@type lsp.WorkspaceDiagnosticParams
+      local params = ctx.params
       for _, report in ipairs(result.items) do
         local bufnr = vim.uri_to_bufnr(report.uri)
 
         -- Start tracking the buffer (but don't send "textDocument/diagnostic" requests for it).
-        if not bufstates[bufnr] then
-          bufstates[bufnr] = { pull_kind = 'workspace', client_result_id = {} }
+        local provider = Diagnostics.active[bufnr] or Diagnostics:new(bufnr)
+        local state = provider.client_state[ctx.client_id]
+        if not state then
+          state = { pull_kind = 'workspace', result_id = {} }
+          provider.client_state[ctx.client_id] = state
         end
 
         -- We favor document pull requests over workspace results, so only update the buffer
         -- state if we're not pulling document diagnostics for this buffer.
-        if bufstates[bufnr].pull_kind == 'workspace' and report.kind == 'full' then
-          handle_diagnostics(report.uri, ctx.client_id, report.items, true)
-          bufstates[bufnr].client_result_id[ctx.client_id] = report.resultId
+        if state.pull_kind == 'workspace' and report.kind == 'full' then
+          handle_diagnostics(report.uri, ctx.client_id, report.items, true, params.identifier)
+          local key = result_id_key(params.identifier)
+          state.result_id[key] = report.resultId
         end
       end
     end
   end
 
   for _, client in ipairs(clients) do
-    --- @type lsp.WorkspaceDiagnosticParams
-    local params = {
-      identifier = vim.tbl_get(client, 'server_capabilities, diagnosticProvider', 'identifier'),
-      previousResultIds = previous_result_ids(client.id),
-    }
+    ---@param cap lsp.DiagnosticRegistrationOptions
+    client:_provider_foreach('workspace/diagnostic', function(cap)
+      --- @type lsp.WorkspaceDiagnosticParams
+      local params = {
+        identifier = cap.identifier,
+        previousResultIds = previous_result_ids(client.id, cap.identifier),
+      }
 
-    client:request('workspace/diagnostic', params, handler)
+      client:request('workspace/diagnostic', params, handler)
+    end)
   end
 end
 

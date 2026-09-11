@@ -10,6 +10,7 @@
 #include "nvim/buffer_defs.h"
 #include "nvim/cmdexpand_defs.h"  // IWYU pragma: keep
 #include "nvim/eval/typval_defs.h"  // IWYU pragma: keep
+#include "nvim/event/defs.h"
 #include "nvim/ex_cmds_defs.h"  // IWYU pragma: keep
 #include "nvim/macros_defs.h"
 #include "nvim/pos_defs.h"
@@ -41,19 +42,6 @@ EXTERN int autocmd_bufnr INIT( = 0);            ///< fnum for <abuf> on cmdline
 EXTERN char *autocmd_match INIT( = NULL);       ///< name for <amatch> on cmdline
 EXTERN bool did_cursorhold INIT( = true);       ///< set when CursorHold t'gerd
 
-typedef struct {
-  win_T *auc_win;     ///< Window used in aucmd_prepbuf().  When not NULL the
-                      ///< window has been allocated.
-  bool auc_win_used;  ///< This auc_win is being used.
-} aucmdwin_T;
-
-/// When executing autocommands for a buffer that is not in any window, a
-/// special window is created to handle the side effects.  When autocommands
-/// nest we may need more than one.
-EXTERN kvec_t(aucmdwin_T) aucmd_win_vec INIT( = KV_INITIAL_VALUE);
-#define aucmd_win (aucmd_win_vec.items)
-#define AUCMD_WIN_COUNT ((int)aucmd_win_vec.size)
-
 enum {
   AUGROUP_DEFAULT = -1,  ///< default autocmd group
   AUGROUP_ERROR   = -2,  ///< erroneous autocmd group
@@ -67,5 +55,9 @@ enum { BUFLOCAL_PAT_LEN = 25, };
 /// Iterates over all the events for auto commands
 #define FOR_ALL_AUEVENTS(event) \
   for (event_T event = (event_T)0; (int)event < (int)NUM_EVENTS; event = (event_T)((int)event + 1))
+
+/// Stores events for execution until a known safe state.
+/// This should be the default for all new autocommands.
+EXTERN MultiQueue *deferred_events INIT( = NULL);
 
 #include "autocmd.h.generated.h"

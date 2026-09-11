@@ -25,7 +25,7 @@ local PATTERNS = {
 ---@param hex string
 ---@return string
 local function hex_to_char(hex)
-  return schar(tonumber(hex, 16))
+  return schar(vim._assert_integer(hex, 16))
 end
 
 ---@param char string
@@ -77,10 +77,10 @@ function M.uri_from_fname(path)
 end
 
 ---Gets a URI from a bufnr.
----@param bufnr integer
+---@param buf integer
 ---@return string URI
-function M.uri_from_bufnr(bufnr)
-  local fname = vim.api.nvim_buf_get_name(bufnr)
+function M.uri_from_bufnr(buf)
+  local fname = vim.api.nvim_buf_get_name(buf)
   local volume_path = fname:match('^([a-zA-Z]:).*')
   local is_windows = volume_path ~= nil
   local scheme ---@type string?
@@ -101,7 +101,7 @@ end
 ---@param uri string
 ---@return string filename or unchanged URI for non-file URIs
 function M.uri_to_fname(uri)
-  local scheme = assert(uri:match(URI_SCHEME_PATTERN), 'URI must contain a scheme: ' .. uri)
+  local scheme = uri:match(URI_SCHEME_PATTERN) or error('URI must contain a scheme: ' .. uri)
   if scheme ~= 'file' then
     return uri
   end

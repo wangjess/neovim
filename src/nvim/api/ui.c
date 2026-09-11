@@ -17,6 +17,7 @@
 #include "nvim/autocmd_defs.h"
 #include "nvim/channel.h"
 #include "nvim/channel_defs.h"
+#include "nvim/errors.h"
 #include "nvim/eval/typval.h"
 #include "nvim/eval/vars.h"
 #include "nvim/event/defs.h"
@@ -39,6 +40,10 @@
 #include "nvim/option.h"
 #include "nvim/types_defs.h"
 #include "nvim/ui.h"
+
+#ifdef MSWIN
+# include "nvim/os/os_win_console.h"
+#endif
 
 #define BUF_POS(ui) ((size_t)((ui)->packer.ptr - (ui)->packer.startptr))
 
@@ -108,6 +113,68 @@ void remote_ui_disconnect(uint64_t channel_id, Error *err, bool send_error_exit)
   remote_ui_destroy(ui);
 }
 
+/// Detaches the UI on channel `chan` (server keeps running). Sets `channel.detach`, sends an
+/// "error_exit" UI event, and closes the channel.
+///
+/// @param chan  UI channel to disconnect.
+/// @param[out] err Error details, if any.
+void ui_detach_channel(uint64_t chan, Error *err)
+{
+  Channel *c = find_channel(chan);
+  VALIDATE(c != NULL, "%s", e_invchan, {
+    return;
+  });
+#ifdef MSWIN
+  bool detach_stdio = c->streamtype == kChannelStreamStdio;
+#endif
+  // Prevent server self-exit on channel-close.
+  c->detach = true;
+  // Server-side UI detach. Doesn't close the channel.
+  remote_ui_disconnect(chan, err, true);
+  if (ERROR_SET(err)) {
+    return;
+  }
+  // Server-side channel close.
+  channel_close(chan, kChannelPartAll, NULL);
+#ifdef MSWIN
+  if (detach_stdio) {
+    // After UI/channel detach, move this server off the parent's console so it
+    // survives terminal closure and still has working CONIN$/CONOUT$.
+    os_swap_to_hidden_console();
+  }
+#endif
+}
+
+/// Detaches every UI except `keep_chan` (server keeps running).
+///
+/// @param keep_chan  UI channel to preserve.
+/// @return Number of UIs detached.
+size_t ui_detach_others(uint64_t keep_chan)
+{
+  // Snapshot the channel ids first: ui_detach_channel() mutates connected_uis.
+  kvec_t(uint64_t) chans = KV_INITIAL_VALUE;
+  uint64_t chan;
+  map_foreach_key(&connected_uis, chan, {
+    if (chan != keep_chan) {
+      kv_push(chans, chan);
+    }
+  });
+
+  size_t detached = 0;
+  for (size_t i = 0; i < kv_size(chans); i++) {
+    Error err = ERROR_INIT;
+    ui_detach_channel(kv_A(chans, i), &err);
+    if (ERROR_SET(&err)) {
+      api_clear_error(&err);
+    } else {
+      detached++;
+    }
+  }
+
+  kv_destroy(chans);
+  return detached;
+}
+
 #ifdef EXITFREE
 void remote_ui_free_all_mem(void)
 {
@@ -120,23 +187,9 @@ void remote_ui_free_all_mem(void)
 #endif
 
 /// Wait until UI has connected.
-///
-/// @param only_stdio UI is expected to connect on stdio.
-void remote_ui_wait_for_attach(bool only_stdio)
+void remote_ui_wait_for_attach(void)
 {
-  if (only_stdio) {
-    Channel *channel = find_channel(CHAN_STDIO);
-    if (!channel) {
-      // `only_stdio` implies --embed mode, thus stdio channel can be assumed.
-      abort();
-    }
-
-    LOOP_PROCESS_EVENTS_UNTIL(&main_loop, channel->events, -1,
-                              map_has(uint64_t, &connected_uis, CHAN_STDIO));
-  } else {
-    LOOP_PROCESS_EVENTS_UNTIL(&main_loop, main_loop.events, -1,
-                              ui_active());
-  }
+  LOOP_PROCESS_EVENTS_UNTIL(&main_loop, main_loop.events, -1, ui_active());
 }
 
 /// Activates UI events on the channel.
@@ -162,10 +215,13 @@ void nvim_ui_attach(uint64_t channel_id, Integer width, Integer height, Dict opt
                   "UI already attached to channel: %" PRId64, channel_id);
     return;
   }
+  if (!ui_can_attach_more()) {
+    api_set_error(err, kErrorTypeException, "Maximum UI count reached");
+    return;
+  }
 
   if (width <= 0 || height <= 0) {
-    api_set_error(err, kErrorTypeValidation,
-                  "Expected width > 0 and height > 0");
+    api_set_error(err, kErrorTypeValidation, "Expected width > 0 and height > 0");
     return;
   }
   RemoteUI *ui = xcalloc(1, sizeof(RemoteUI));
@@ -262,61 +318,6 @@ void nvim_ui_detach(uint64_t channel_id, Error *err)
   FUNC_API_SINCE(1) FUNC_API_REMOTE_ONLY
 {
   remote_ui_disconnect(channel_id, err, false);
-}
-
-/// Sends a "restart" UI event to the UI on the given channel.
-///
-/// @return  false if there is no UI on the channel, otherwise true
-bool remote_ui_restart(uint64_t channel_id, Error *err)
-{
-  RemoteUI *ui = get_ui_or_err(channel_id, err);
-  if (!ui) {
-    return false;
-  }
-
-  MAXSIZE_TEMP_ARRAY(args, 2);
-
-  ADD_C(args, CSTR_AS_OBJ(get_vim_var_str(VV_PROGPATH)));
-
-  Arena arena = ARENA_EMPTY;
-  const list_T *l = get_vim_var_list(VV_ARGV);
-  int argc = tv_list_len(l);
-  assert(argc > 0);
-  Array argv = arena_array(&arena, (size_t)argc + 1);
-  bool had_minmin = false;
-  bool skipping_minc = false;  // Skip -c <cmd> from argv.
-  bool first_minc = true;  // Avoid skipping the first -c <cmd> from argv.
-  TV_LIST_ITER_CONST(l, li, {
-    const char *arg = tv_get_string(TV_LIST_ITEM_TV(li));
-    if (argv.size > 0 && !had_minmin && strequal(arg, "--")) {
-      had_minmin = true;
-      skipping_minc = false;
-    }
-    bool startswith_min = strlen(arg) > 0 && arg[0] == '-';
-    bool startswith_minmin = strlen(arg) > 1 && arg[0] == '-' && arg[1] == '-';
-    if (skipping_minc && (startswith_min || startswith_minmin)) {
-      skipping_minc = false;
-    }
-    if (!had_minmin && !skipping_minc && strequal(arg, "-c")) {
-      if (!first_minc) {
-        skipping_minc = true;
-        continue;
-      }
-      first_minc = false;
-    }
-    // Exclude --embed/--headless/-c <cmd> from `argv`, as the client may start the server in a
-    // different way than how the server was originally started.
-    // Eg: 'nvim -c foo -c bar --embed --headless -- example.txt' would be parsed as { 'nvim', '-c', 'foo', '--', 'example.txt' }.
-    if (argv.size == 0 || had_minmin
-        || (!strequal(arg, "--embed") && !strequal(arg, "--headless") && !skipping_minc)) {
-      ADD_C(argv, CSTR_AS_OBJ(arg));
-    }
-  });
-  ADD_C(args, ARRAY_OBJ(argv));
-
-  push_call(ui, "restart", args);
-  arena_mem_free(arena_finish(&arena));
-  return true;
 }
 
 // Send a connect UI event to the UI on the given channel
@@ -469,7 +470,9 @@ static void ui_set_option(RemoteUI *ui, bool init, String name, Object value, Er
     }
   }
 
-  api_set_error(err, kErrorTypeValidation, "No such UI option: %s", name.data);
+  VALIDATE_S(false, "UI option", name.data, {
+    return;
+  });
 }
 
 /// Tell Nvim to resize a grid. Triggers a grid_resize event with the requested
@@ -517,8 +520,7 @@ void nvim_ui_pum_set_height(uint64_t channel_id, Integer height, Error *err)
   }
 
   if (!ui->ui_ext[kUIPopupmenu]) {
-    api_set_error(err, kErrorTypeValidation,
-                  "It must support the ext_popupmenu option");
+    api_set_error(err, kErrorTypeValidation, "UI must support the ext_popupmenu option");
     return;
   }
 

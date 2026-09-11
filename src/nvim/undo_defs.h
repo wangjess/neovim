@@ -2,8 +2,10 @@
 
 #include <time.h>
 
+#include "nvim/eval/typval_defs.h"
 #include "nvim/extmark_defs.h"
 #include "nvim/mark_defs.h"
+#include "nvim/option_defs.h"
 
 enum { UNDO_HASH_SIZE = 32, };  ///< Size in bytes of the hash used in the undo file.
 
@@ -11,10 +13,10 @@ typedef struct u_header u_header_T;
 
 /// Structure to store info about the Visual area.
 typedef struct {
-  pos_T vi_start;       ///< start pos of last VIsual
-  pos_T vi_end;         ///< end position of last VIsual
-  int vi_mode;          ///< VIsual_mode of last VIsual
-  colnr_T vi_curswant;  ///< MAXCOL from w_curswant
+  pos_T vi_start;       ///< Start pos of last Visual.
+  pos_T vi_end;         ///< End position of last Visual.
+  int vi_mode;          ///< Visual.mode of last Visual.
+  colnr_T vi_curswant;  ///< MAXCOL from w_curswant.
 } visualinfo_T;
 
 typedef struct u_entry u_entry_T;
@@ -53,8 +55,9 @@ struct u_header {
   int uh_walk;                    ///< used by undo_time()
   u_entry_T *uh_entry;            ///< pointer to first entry
   u_entry_T *uh_getbot_entry;     ///< pointer to where ue_bot must be set
-  pos_T uh_cursor;                ///< cursor position before saving
-  colnr_T uh_cursor_vcol;
+  pos_T uh_cursor;                ///< Pre-change cursor pos; restored on undo.
+  pos_T uh_cursor_after;          ///< Post-change pos; restored on redo. Not saved to undofile.
+  colnr_T uh_cursor_vcol;         ///< Virtual column of uh_cursor ('virtualedit'), or -1.
   int uh_flags;                   ///< see below
   fmark_T uh_namedm[NMARKS];      ///< marks before undo/after redo
   extmark_undo_vec_t uh_extmark;  ///< info to move extmarks
@@ -73,3 +76,24 @@ enum {
   UH_EMPTYBUF = 0x02,  ///< buffer was empty
   UH_RELOAD   = 0x04,  ///< buffer was reloaded
 };
+
+/// Checkpoint of buffer undo state, for "undo-invisible" speculative edits: u_checkpoint() detaches
+/// the undo tree so subsequent edits build a disposable one; u_rollback() reverts those edits and
+/// reattaches the checkpointed tree.  Used by 'inccommand' preview.
+typedef struct {
+  u_header_T *uc_oldhead;
+  u_header_T *uc_newhead;
+  u_header_T *uc_curhead;
+  int uc_numhead;
+  bool uc_synced;
+  int uc_seq_last;
+  int uc_save_nr_last;
+  int uc_seq_cur;
+  time_t uc_time_cur;
+  int uc_save_nr_cur;
+  char *uc_line_ptr;
+  linenr_T uc_line_lnum;
+  colnr_T uc_line_colnr;
+  OptInt uc_undolevels;        ///< saved 'undolevels'
+  varnumber_T uc_changedtick;  ///< saved b:changedtick
+} UndoCheckpoint;

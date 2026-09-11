@@ -3921,12 +3921,8 @@ msgstr ""
 "\n"
 "Impossible d'exécuter le shell sh\n"
 
-msgid ""
-"\n"
-"shell returned "
-msgstr ""
-"\n"
-"le shell a retourné "
+msgid "shell returned "
+msgstr "le shell a retourné "
 
 msgid ""
 "\n"
@@ -4884,12 +4880,12 @@ msgstr ""
 msgid "E783: duplicate char in MAP entry"
 msgstr "E783: caractère dupliqué dans l'entrée MAP"
 
-msgid "Sorry, no suggestions"
-msgstr "Désolé, aucune suggestion"
+msgid "No suggestions"
+msgstr "Aucune suggestion"
 
 #, c-format
-msgid "Sorry, only %ld suggestions"
-msgstr "Désolé, seulement %ld suggestions"
+msgid "Only %ld suggestions"
+msgstr "Seulement %ld suggestions"
 
 #, c-format
 msgid "Change \"%.*s\" to:"
@@ -6359,10 +6355,6 @@ msgstr "E471: Argument requis"
 
 msgid "E10: \\ should be followed by /, ? or &"
 msgstr "E10: \\ devrait être suivi de /, ? ou &"
-
-msgid "E11: Invalid in command-line window; <CR> executes, CTRL-C quits"
-msgstr ""
-"E11: Invalide dans la fenêtre ligne-de-commande ; <CR> exécute, CTRL-C quitte"
 
 msgid "E12: Command not allowed from exrc/vimrc in current dir or tag search"
 msgstr ""

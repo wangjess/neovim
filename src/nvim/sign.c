@@ -20,7 +20,6 @@
 #include "nvim/decoration.h"
 #include "nvim/decoration_defs.h"
 #include "nvim/drawscreen.h"
-#include "nvim/edit.h"
 #include "nvim/errors.h"
 #include "nvim/eval/funcs.h"
 #include "nvim/eval/typval.h"
@@ -34,6 +33,7 @@
 #include "nvim/grid.h"
 #include "nvim/highlight_defs.h"
 #include "nvim/highlight_group.h"
+#include "nvim/insert.h"
 #include "nvim/macros_defs.h"
 #include "nvim/map_defs.h"
 #include "nvim/marktree.h"
@@ -260,13 +260,13 @@ static void sign_list_placed(buf_T *rbuf, char *group)
   int64_t ns = group_get_ns(group);
 
   msg_puts_title(_("\n--- Signs ---"));
-  msg_putchar('\n');
 
   while (buf != NULL && !got_int) {
     if (buf_has_signs(buf)) {
-      vim_snprintf(lbuf, MSG_BUF_LEN, _("Signs for %s:"), buf->b_fname);
-      msg_puts_hl(lbuf, HLF_D, false);
       msg_putchar('\n');
+      const char *fname = buf->b_fname ? buf->b_fname : _("Untitled");
+      snprintf(lbuf, MSG_BUF_LEN, _("Signs for %s:"), fname);
+      msg_puts_hl(lbuf, HLF_D, false);
     }
 
     if (ns >= 0) {
@@ -285,6 +285,7 @@ static void sign_list_placed(buf_T *rbuf, char *group)
 
       if (kv_size(signs)) {
         qsort((void *)&kv_A(signs, 0), kv_size(signs), sizeof(MTKey), sign_row_cmp);
+        msg_putchar('\n');
 
         for (size_t i = 0; i < kv_size(signs); i++) {
           namebuf[0] = NUL;
@@ -301,7 +302,9 @@ static void sign_list_placed(buf_T *rbuf, char *group)
           vim_snprintf(lbuf, MSG_BUF_LEN, _("    line=%" PRIdLINENR "  id=%u%s%s  priority=%d"),
                        mark.pos.row + 1, mark.id, groupbuf, namebuf, sh->priority);
           msg_puts(lbuf);
-          msg_putchar('\n');
+          if (i < kv_size(signs) - 1) {
+            msg_putchar('\n');
+          }
         }
         kv_destroy(signs);
       }
@@ -590,7 +593,7 @@ static linenr_T sign_jump(int id, char *group, buf_T *buf)
   linenr_T lnum = buf_findsign(buf, id, group);
 
   if (lnum <= 0) {
-    semsg(_("E157: Invalid sign ID: %" PRId32), id);
+    semsg(_("E157: Invalid sign ID: %d"), id);
     return -1;
   }
 
@@ -914,7 +917,11 @@ static dict_T *sign_get_info_dict(sign_T *sp)
   for (int i = 0; i < 4; i++) {
     if (hl[i] > 0) {
       const char *p = get_highlight_name_ext(NULL, hl[i] - 1, false);
-      tv_dict_add_str(d, arg[i], strlen(arg[i]), p ? p : "NONE");
+      if (p == NULL) {
+        tv_dict_add_str_len(d, arg[i], strlen(arg[i]), S_LEN("NONE"));
+      } else {
+        tv_dict_add_str(d, arg[i], strlen(arg[i]), p);
+      }
     }
   }
   return d;

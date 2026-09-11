@@ -1,6 +1,8 @@
 local t = require('test.testutil')
 local n = require('test.functional.testnvim')()
 
+local describe, it, before_each, after_each, pending =
+  t.describe, t.it, t.before_each, t.after_each, t.pending
 local eq, eval, clear, write_file, source, insert =
   t.eq, n.eval, n.clear, t.write_file, n.source, n.insert
 local pcall_err = t.pcall_err
@@ -10,7 +12,7 @@ local fn = n.fn
 local api = n.api
 local skip = t.skip
 local is_os = t.is_os
-local is_ci = t.is_ci
+local read_file = t.read_file
 
 local fname = 'Xtest-functional-ex_cmds-write'
 local fname_bak = fname .. '~'
@@ -18,15 +20,10 @@ local fname_broken = fname_bak .. 'broken'
 
 describe(':write', function()
   local function cleanup()
-    os.remove('test_bkc_file.txt')
-    os.remove('test_bkc_link.txt')
-    os.remove('test_fifo')
-    os.remove('test/write/p_opt.txt')
-    os.remove('test/write')
-    os.remove('test/write2/p_opt.txt')
-    os.remove('test/write2/p_opt2.txt')
-    os.remove('test/write2')
-    os.remove('test')
+    n.rmdir('Xtest_write')
+    os.remove('Xtest_bkc_file.txt')
+    os.remove('Xtest_bkc_link.txt')
+    os.remove('Xtest_fifo')
     os.remove(fname)
     os.remove(fname_bak)
     os.remove(fname_broken)
@@ -41,60 +38,59 @@ describe(':write', function()
 
   it('&backupcopy=auto preserves symlinks', function()
     command('set backupcopy=auto')
-    write_file('test_bkc_file.txt', 'content0')
+    write_file('Xtest_bkc_file.txt', 'content0')
     if is_os('win') then
-      command('silent !mklink test_bkc_link.txt test_bkc_file.txt')
+      command('silent !mklink Xtest_bkc_link.txt Xtest_bkc_file.txt')
     else
-      command('silent !ln -s test_bkc_file.txt test_bkc_link.txt')
+      command('silent !ln -s Xtest_bkc_file.txt Xtest_bkc_link.txt')
     end
     if eval('v:shell_error') ~= 0 then
       pending('Cannot create symlink')
     end
     source([[
-      edit test_bkc_link.txt
+      edit Xtest_bkc_link.txt
       call setline(1, ['content1'])
       write
     ]])
-    eq(eval("['content1']"), eval("readfile('test_bkc_file.txt')"))
-    eq(eval("['content1']"), eval("readfile('test_bkc_link.txt')"))
+    eq(eval("['content1']"), eval("readfile('Xtest_bkc_file.txt')"))
+    eq(eval("['content1']"), eval("readfile('Xtest_bkc_link.txt')"))
   end)
 
   it('&backupcopy=no replaces symlink with new file', function()
-    skip(is_ci('cirrus'))
     command('set backupcopy=no')
-    write_file('test_bkc_file.txt', 'content0')
+    write_file('Xtest_bkc_file.txt', 'content0')
     if is_os('win') then
-      command('silent !mklink test_bkc_link.txt test_bkc_file.txt')
+      command('silent !mklink Xtest_bkc_link.txt Xtest_bkc_file.txt')
     else
-      command('silent !ln -s test_bkc_file.txt test_bkc_link.txt')
+      command('silent !ln -s Xtest_bkc_file.txt Xtest_bkc_link.txt')
     end
     if eval('v:shell_error') ~= 0 then
       pending('Cannot create symlink')
     end
     source([[
-      edit test_bkc_link.txt
+      edit Xtest_bkc_link.txt
       call setline(1, ['content1'])
       write
     ]])
-    eq(eval("['content0']"), eval("readfile('test_bkc_file.txt')"))
-    eq(eval("['content1']"), eval("readfile('test_bkc_link.txt')"))
+    eq(eval("['content0']"), eval("readfile('Xtest_bkc_file.txt')"))
+    eq(eval("['content1']"), eval("readfile('Xtest_bkc_link.txt')"))
   end)
 
   it('appends FIFO file', function()
     -- mkfifo creates read-only .lnk files on Windows
     if is_os('win') or eval("executable('mkfifo')") == 0 then
-      pending('missing "mkfifo" command')
+      pending('N/A: missing "mkfifo" command')
     end
 
     local text = 'some fifo text from write_spec'
-    assert(os.execute('mkfifo test_fifo'))
+    assert(os.execute('mkfifo Xtest_fifo'))
     insert(text)
 
     -- Blocks until a consumer reads the FIFO.
-    feed_command('write >> test_fifo')
+    feed_command('write >> Xtest_fifo')
 
     -- Read the FIFO, this will unblock the :write above.
-    local fifo = assert(io.open('test_fifo'))
+    local fifo = assert(io.open('Xtest_fifo'))
     eq(text .. '\n', fifo:read('*all'))
     fifo:close()
   end)
@@ -110,49 +106,53 @@ describe(':write', function()
     eq(1, eval("filereadable('p_opt.txt')"))
     os.remove('p_opt.txt')
 
-    eq(0, eval("filereadable('test/write/p_opt.txt')"))
-    command('write ++p test/write/p_opt.txt')
-    eq(1, eval("filereadable('test/write/p_opt.txt')"))
+    eq(0, eval("filereadable('Xtest_write/write/p_opt.txt')"))
+    command('write ++p Xtest_write/write/p_opt.txt')
+    eq(1, eval("filereadable('Xtest_write/write/p_opt.txt')"))
 
-    eq(0, eval("filereadable('test/write2/p_opt.txt')"))
-    eq(0, eval("filereadable('test/write2/p_opt2.txt')"))
-    eq(0, eval("filereadable('test/write3/p_opt3.txt')"))
-    command('file test/write2/p_opt.txt')
+    eq(0, eval("filereadable('Xtest_write/write2/p_opt.txt')"))
+    eq(0, eval("filereadable('Xtest_write/write2/p_opt2.txt')"))
+    eq(0, eval("filereadable('Xtest_write/write3/p_opt3.txt')"))
+    command('file Xtest_write/write2/p_opt.txt')
     command('set modified')
-    command('sp test/write2/p_opt2.txt')
+    command('sp Xtest_write/write2/p_opt2.txt')
     command('set modified')
-    command('sp test/write3/p_opt3.txt')
+    command('sp Xtest_write/write3/p_opt3.txt')
     -- don't set p_opt3.txt modified - assert it isn't written
     -- and that write3/ isn't created
     command('wall ++p')
-    eq(1, eval("filereadable('test/write2/p_opt.txt')"))
-    eq(1, eval("filereadable('test/write2/p_opt2.txt')"))
-    eq(0, eval("filereadable('test/write3/p_opt3.txt')"))
+    eq(1, eval("filereadable('Xtest_write/write2/p_opt.txt')"))
+    eq(1, eval("filereadable('Xtest_write/write2/p_opt2.txt')"))
+    eq(0, eval("filereadable('Xtest_write/write3/p_opt3.txt')"))
+    t.matches(
+      'E474: Invalid argument',
+      pcall_err(command, 'read ++edits Xtest_write/write/p_opt.txt')
+    )
 
-    eq('Vim(write):E32: No file name', pcall_err(command, 'write ++p test_write/'))
-    if not is_os('win') then
-      eq(
-        ('Vim(write):E17: "' .. fn.fnamemodify('.', ':p:h') .. '" is a directory'),
-        pcall_err(command, 'write ++p .')
-      )
-      eq(
-        ('Vim(write):E17: "' .. fn.fnamemodify('.', ':p:h') .. '" is a directory'),
-        pcall_err(command, 'write ++p ./')
-      )
-    end
+    eq('Vim(write):E32: No file name', pcall_err(command, 'write ++p Xotherdir/'))
+    eq(
+      ('Vim(write):E17: "' .. fn.fnamemodify('.', ':p:h') .. '" is a directory'),
+      pcall_err(command, 'write ++p .')
+    )
+    eq(
+      ('Vim(write):E17: "' .. fn.fnamemodify('.', ':p:h') .. '" is a directory'),
+      pcall_err(command, 'write ++p ./')
+    )
+
+    t.matches(
+      'E474: Invalid argument',
+      pcall_err(command, 'write ++patate Xtest_write/garbage.txt')
+    )
   end)
 
   it('errors out correctly', function()
-    skip(is_ci('cirrus'))
     command('let $HOME=""')
     eq(fn.fnamemodify('.', ':p:h'), fn.fnamemodify('.', ':p:h:~'))
     -- Message from check_overwrite
-    if not is_os('win') then
-      eq(
-        ('Vim(write):E17: "' .. fn.fnamemodify('.', ':p:h') .. '" is a directory'),
-        pcall_err(command, 'write .')
-      )
-    end
+    eq(
+      ('Vim(write):E17: "' .. fn.fnamemodify('.', ':p:h') .. '" is a directory'),
+      pcall_err(command, 'write .')
+    )
     api.nvim_set_option_value('writeany', true, {})
     -- Message from buf_write
     eq('Vim(write):E502: "." is a directory', pcall_err(command, 'write .'))
@@ -177,36 +177,148 @@ describe(':write', function()
       eq(true, os.remove(fname_bak))
     end
     write_file(fname_bak, 'TTYX')
-    skip(is_os('win'), [[FIXME: exc_exec('write!') outputs 0 in Windows]])
+    skip(is_os('win'), [[FIXME: pcall_err(command, 'write!') outputs 0 in Windows]])
     vim.uv.fs_symlink(fname_bak .. ('/xxxxx'):rep(20), fname)
     eq("Vim(write):E166: Can't open linked file for writing", pcall_err(command, 'write!'))
+  end)
+
+  it('fails converting a trailing incomplete sequence', function()
+    -- From https://github.com/neovim/neovim/issues/36990, an invalid UTF-8 sequence at the end of
+    -- the file during conversion testing can overwrite the rest of the file during the real
+    -- conversion.
+
+    api.nvim_buf_set_lines(0, 0, 1, true, { 'line 1', 'line 2', 'aaabbb\235\128' })
+    command('set noendofline nofixendofline')
+
+    eq(
+      "Vim(write):E513: Write error, conversion failed in line 3 (make 'fenc' empty to override)",
+      pcall_err(command, 'write ++enc=latin1 ' .. fname)
+    )
+  end)
+
+  it('converts to latin1 with an invalid sequence at buffer boundary', function()
+    -- From https://github.com/neovim/neovim/issues/36990, an invalid UTF-8 sequence that falls
+    -- right at the end of the 8 KiB buffer used for encoding conversions causes subsequent data to
+    -- be overwritten.
+
+    local content = string.rep('a', 1024 * 8 - 1) .. '\251' .. string.rep('b', 20)
+    api.nvim_buf_set_lines(0, 0, 1, true, { content })
+    command('set noendofline nofixendofline fenc=latin1')
+    command('write ' .. fname)
+
+    local tail = string.sub(read_file(fname) or '', -10)
+    eq('bbbbbbbbbb', tail)
+  end)
+
+  it('converts to CP1251 with iconv', function()
+    api.nvim_buf_set_lines(
+      0,
+      0,
+      1,
+      true,
+      { 'Привет, мир!', 'Это простой тест.' }
+    )
+    command('write ++enc=cp1251 ++ff=unix ' .. fname)
+
+    eq(
+      '\207\240\232\226\229\242, \236\232\240!\n'
+        .. '\221\242\238 \239\240\238\241\242\238\233 \242\229\241\242.\n',
+      read_file(fname)
+    )
+  end)
+
+  it('converts to GB18030 with iconv', function()
+    api.nvim_buf_set_lines(0, 0, 1, true, { '你好，世界！', '这是一个测试。' })
+    command('write ++enc=gb18030 ++ff=unix ' .. fname)
+
+    eq(
+      '\196\227\186\195\163\172\202\192\189\231\163\161\n'
+        .. '\213\226\202\199\210\187\184\246\178\226\202\212\161\163\n',
+      read_file(fname)
+    )
+  end)
+
+  it('converts to Shift_JIS with iconv', function()
+    api.nvim_buf_set_lines(
+      0,
+      0,
+      1,
+      true,
+      { 'こんにちは、世界！', 'これはテストです。' }
+    )
+    command('write ++enc=sjis ++ff=unix ' .. fname)
+
+    eq(
+      '\130\177\130\241\130\201\130\191\130\205\129A\144\162\138E\129I\n'
+        .. '\130\177\130\234\130\205\131e\131X\131g\130\197\130\183\129B\n',
+      read_file(fname)
+    )
+  end)
+
+  it('fails converting an illegal sequence with iconv', function()
+    api.nvim_buf_set_lines(0, 0, 1, true, { 'line 1', 'aaa\128bbb' })
+
+    eq(
+      "Vim(write):E513: Write error, conversion failed (make 'fenc' empty to override)",
+      pcall_err(command, 'write ++enc=cp1251 ' .. fname)
+    )
+  end)
+
+  it('unaffected if a Progress handler changes CWD #41417', function()
+    -- ASAN catches the read of the freed name. Also assert the written file name/contents.
+    local dir = vim.fs.normalize(t.tmpname(false))
+    t.mkdir(dir)
+    local file = dir .. '/f.txt'
+    write_file(file, 'one\n')
+    command('edit ' .. file)
+    command('lcd ' .. dir)
+    eq('f.txt', fn.bufname('%'))
+    -- Frees every buffer's short name, twice; the net CWD is unchanged.
+    command(('autocmd Progress * lcd %s | lcd %s'):format(vim.fs.dirname(dir), dir))
+    api.nvim_buf_set_lines(0, 0, -1, true, { 'one', 'two' })
+    command('write')
+
+    eq('f.txt', fn.bufname('%'))
+    eq({ 'one', 'two' }, fn.readfile(file))
+    eq({ 'f.txt' }, fn.readdir(dir))
+  end)
+
+  it('handles a multi-byte sequence crossing the buffer boundary converting with iconv', function()
+    local content = string.rep('a', 1024 * 8 - 1) .. 'Дbbbbb'
+    api.nvim_buf_set_lines(0, 0, 1, true, { content })
+    -- Skip the backup so we're testing the "checking" phase also.
+    command('set nowritebackup')
+    command('write ++enc=cp1251 ++ff=unix ' .. fname)
+
+    local expected = string.rep('a', 1024 * 8 - 1) .. '\196bbbbb\n'
+    eq(expected, read_file(fname))
   end)
 end)
 
 describe(':update', function()
   before_each(function()
     clear()
-    fn.mkdir('test_dir', 'p')
+    fn.mkdir('Xtest_update', 'p')
   end)
 
   after_each(function()
-    fn.delete('test_dir', 'rf')
+    fn.delete('Xtest_update', 'rf')
   end)
 
   it('works for a new buffer', function()
-    command('edit test_dir/foo/bar/nonexist.taz | update ++p')
-    eq(1, eval("filereadable('test_dir/foo/bar/nonexist.taz')"))
+    command('edit Xtest_update/foo/bar/nonexist.taz | update ++p')
+    eq(1, eval("filereadable('Xtest_update/foo/bar/nonexist.taz')"))
   end)
 
   it('writes modified buffer', function()
-    command('edit test_dir/modified.txt')
+    command('edit Xtest_update/modified.txt')
     command('call setline(1, "hello world")')
     command('update')
-    eq({ 'hello world' }, fn.readfile('test_dir/modified.txt'))
+    eq({ 'hello world' }, fn.readfile('Xtest_update/modified.txt'))
   end)
 
   it('does not write unmodified existing file', function()
-    local filename = 'test_dir/existing.txt'
+    local filename = 'Xtest_update/existing.txt'
     local fd = io.open(filename, 'w')
     fd:write('content')
     fd:close()
@@ -217,10 +329,10 @@ describe(':update', function()
   end)
 
   it('creates parent directories with ++p', function()
-    command('edit test_dir/deep/nested/path/file.txt')
+    command('edit Xtest_update/deep/nested/path/file.txt')
     command('call setline(1, "content")')
     command('update ++p')
-    eq(1, eval("filereadable('test_dir/deep/nested/path/file.txt')"))
+    eq(1, eval("filereadable('Xtest_update/deep/nested/path/file.txt')"))
   end)
 
   it('fails gracefully for unnamed buffer', function()
@@ -230,7 +342,7 @@ describe(':update', function()
   end)
 
   it('respects readonly files', function()
-    local filename = 'test_dir/readonly.txt'
+    local filename = 'Xtest_update/readonly.txt'
     local fd = io.open(filename, 'w')
     fd:write('readonly content')
     fd:close()
@@ -243,33 +355,33 @@ describe(':update', function()
     )
 
     command('update!')
-    eq({ 'modified' }, fn.readfile('test_dir/readonly.txt'))
+    eq({ 'modified' }, fn.readfile('Xtest_update/readonly.txt'))
   end)
 
   it('can write line ranges', function()
-    command('edit test_dir/range.txt')
+    command('edit Xtest_update/range.txt')
     command('call setline(1, ["line1", "line2", "line3", "line4"])')
     command('2,3update!')
-    eq({ 'line2', 'line3' }, fn.readfile('test_dir/range.txt'))
+    eq({ 'line2', 'line3' }, fn.readfile('Xtest_update/range.txt'))
   end)
 
   it('can append to existing file', function()
-    local filename = 'test_dir/append.txt'
+    local filename = 'Xtest_update/append.txt'
     local fd = io.open(filename, 'w')
     fd:write('existing\n')
     fd:close()
-    command('edit test_dir/new_content.txt')
+    command('edit Xtest_update/new_content.txt')
     command('call setline(1, "new content")')
     command('update >> ' .. filename)
 
-    eq({ 'existing', 'new content' }, fn.readfile('test_dir/append.txt'))
+    eq({ 'existing', 'new content' }, fn.readfile('Xtest_update/append.txt'))
   end)
 
   it('triggers autocmds properly', function()
     command('autocmd BufWritePre * let g:write_pre = 1')
     command('autocmd BufWritePost * let g:write_post = 1')
 
-    command('edit test_dir/autocmd.txt')
+    command('edit Xtest_update/autocmd.txt')
     command('call setline(1, "trigger autocmds")')
     command('update')
 

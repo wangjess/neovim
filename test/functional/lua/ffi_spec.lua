@@ -1,6 +1,7 @@
 local t = require('test.testutil')
 local n = require('test.functional.testnvim')()
 
+local describe, it, before_each, pending = t.describe, t.it, t.before_each, t.pending
 local eq = t.eq
 local exec_lua = n.exec_lua
 local clear = n.clear
@@ -10,7 +11,7 @@ before_each(clear)
 describe('ffi.cdef', function()
   it('can use Neovim core functions', function()
     if not exec_lua("return pcall(require, 'ffi')") then
-      pending('missing LuaJIT FFI')
+      pending('N/A: missing LuaJIT FFI')
     end
 
     eq(

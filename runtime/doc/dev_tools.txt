@@ -21,7 +21,7 @@ You can start hacking on Nvim in less than 5 minutes:
         cd neovim
         # (Optional) Build and run Nvim:
         make
-        ./build/bin/nvim
+        VIMRUNTIME=./runtime ./build/bin/nvim --luamod-dev
 3. Run a single test. We will start with "example_spec.lua", which is a real
    test that shows how tests are written: >
         make functionaltest TEST_FILE=test/functional/example_spec.lua
@@ -31,7 +31,7 @@ You can start hacking on Nvim in less than 5 minutes:
    Tests that want to check the UI can also use `screen:expect()`.
 6. Now make a code change in Nvim itself, then you can see the effects. The
    example test does `feed('iline1…')`, so let's make a change to the
-   insert-mode code, which lives in `src/nvim/edit.c`. In the
+   insert-mode code, which lives in `src/nvim/insert.c`. In the
    `insert_handle_key` function, just after the `normalchar` label, add this
    code: >
         s->c = 'x';
@@ -62,19 +62,19 @@ Low-level log messages sink to `$NVIM_LOG_FILE`.
 UI events are logged at DEBUG level. >
 
     rm -rf build/
-    make CMAKE_EXTRA_FLAGS="-DLOG_DEBUG"
+    make CMAKE_BUILD_TYPE=Debug
 
 Use `LOG_CALLSTACK()` (Linux only) to log the current stacktrace. To log to an
 alternate file (e.g. stderr) use `LOG_CALLSTACK_TO_FILE(FILE*)`. Requires
 `-no-pie` ([ref](https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=860394#15)): >
 
     rm -rf build/
-    make CMAKE_EXTRA_FLAGS="-DLOG_DEBUG -DCMAKE_C_FLAGS=-no-pie"
+    make CMAKE_BUILD_TYPE=Debug CMAKE_EXTRA_FLAGS="-DCMAKE_C_FLAGS=-no-pie"
 
 Many log messages have a shared prefix, such as "UI" or "RPC". Use the shell to
 filter the log, e.g. at DEBUG level you might want to exclude UI messages: >
 
-    tail -F ~/.local/state/nvim/log | cat -v | stdbuf -o0 grep -v UI | stdbuf -o0 tee -a log
+    tail -F ~/.local/state/nvim/nvim.log | cat -v | stdbuf -o0 grep -v UI | stdbuf -o0 tee -a log
 
 
 ==============================================================================
@@ -92,6 +92,8 @@ TUI INSPECT
 
 Use the Ghostty https://ghostty.org/ inspector tool to observe and query the
 output and events from any terminal application such as Nvim.
+
+From the Ghostty inspector you can click the "Terminal IO" tab to get a trace.
 
 TERMINFO LOGGING
 
@@ -139,9 +141,10 @@ region is repainted internally. To also highlight excess internal redraws, use >
 
 TUI TRACE
 
-In the rare case that you want to collect a trace of terminal output, the
-ancient `script` command is still the "state of the art". The libvterm
-`vterm-dump` utility formats the result for human-readability.
+From the Ghostty inspector you can click the "Terminal IO" tab to get a trace.
+
+Alternatively, the ancient `script` command is the "state of the art". The
+libvterm `vterm-dump` utility formats the result for human-readability.
 
 Record a Nvim terminal session and format it with `vterm-dump`: >sh
 
@@ -385,7 +388,7 @@ Gdb                                                          *dev-tools-gdb*
 
 USING GDB TO STEP THROUGH FUNCTIONAL TESTS
 
-Use `TEST_TAG` to run tests matching busted tags (of the form `#foo` e.g.
+Use `TEST_TAG` to run tests matching `#foo` tags (e.g.
 `it("test #foo ...", ...)`):
 >bash
     GDB=1 TEST_TAG=foo make functionaltest
@@ -400,7 +403,7 @@ Then, in another terminal:
 USING LLDB TO STEP THROUGH UNIT TESTS
 
 >
-    lldb .deps/usr/bin/luajit -- .deps/usr/bin/busted --lpath="./build/?.lua" test/unit/
+    lldb build/bin/nvim -- -l test/runner.lua --lpath=./build/?.lua test/unit/
 <
 USING GDB
 
@@ -527,6 +530,15 @@ Logs will be written to `${HOME}/logs/*san.PID` then.
 
 For more information: https://github.com/google/sanitizers/wiki/SanitizerCommonFlags
 
-
+If you run nvim in the builtin TUI, it can be asked to load the crash log
+after a crash as a quickfix list in a restarted nvim instance.
+Put this in init.lua (adjust quickfix commands to taste):
+>lua
+    if vim.env.ASAN_OPTIONS ~= nil then
+      local log_name = vim.env.HOME.."/logs/asan."..vim.uv.getpid()
+      local args = {"--embed", "-n", "+set efm=%+A%*[^/]%f:%l:%c", "+silent cfile "..log_name, "+silent cfirst", "+silent copen"}
+      vim.api.nvim__set_restart_on_crash("nvim", args)
+    end
+<
 
  vim:tw=78:ts=8:sw=4:et:ft=help:norl:

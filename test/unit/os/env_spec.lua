@@ -1,5 +1,6 @@
 local t = require('test.unit.testutil')
-local itp = t.gen_itp(it)
+local describe = t.describe
+local itp = t.gen_itp(t.it)
 
 local cimport = t.cimport
 local eq = t.eq
@@ -27,6 +28,15 @@ describe('env.c', function()
 
   local function os_getenv(name)
     local rval = cimp.os_getenv(to_cstr(name))
+    if rval ~= NULL then
+      return ffi.string(rval)
+    else
+      return NULL
+    end
+  end
+
+  local function os_getenv_buf(name, buf, bufsize)
+    local rval = cimp.os_getenv_buf(to_cstr(name), buf, bufsize)
     if rval ~= NULL then
       return ffi.string(rval)
     else
@@ -179,6 +189,29 @@ describe('env.c', function()
     end)
   end)
 
+  describe('os_getenv_buf', function()
+    itp('reads an env var into given buffer', function()
+      local name = 'NVIM_UNIT_TEST_GETENV_1N'
+      local value = 'NVIM_UNIT_TEST_GETENV_1V'
+      local bufsize = 200
+      local buf = cstr(bufsize, '')
+      eq(NULL, os_getenv_buf(name, buf, bufsize))
+      -- Use os_setenv because Lua doesn't have setenv.
+      os_setenv(name, value, 1)
+      eq(value, os_getenv_buf(name, buf, bufsize))
+
+      -- Shortest non-empty value
+      os_setenv(name, 'z', 1)
+      eq('z', os_getenv_buf(name, buf, bufsize))
+
+      -- Variable size above `bufsize` gets truncated
+      local verybigval = ('y'):rep(bufsize + 10)
+      local trunc = string.sub(verybigval, 0, bufsize - 1)
+      eq(OK, os_setenv(name, verybigval, 1))
+      eq(trunc, os_getenv_buf(name, buf, bufsize))
+    end)
+  end)
+
   describe('os_getenv_noalloc', function()
     itp('reads an env var without memory allocation', function()
       local name = 'NVIM_UNIT_TEST_GETENV_1N'
@@ -190,7 +223,7 @@ describe('env.c', function()
 
       -- Shortest non-empty value
       os_setenv(name, 'z', 1)
-      eq('z', os_getenv(name))
+      eq('z', os_getenv_noalloc(name))
 
       local bigval = ('x'):rep(256)
       eq(OK, os_setenv(name, bigval, 1))
@@ -205,7 +238,7 @@ describe('env.c', function()
 
       -- Set non-empty, then set empty.
       eq(OK, os_setenv(name, 'non-empty', 1))
-      eq('non-empty', os_getenv(name))
+      eq('non-empty', os_getenv_noalloc(name))
       eq(OK, os_setenv(name, '', 1))
       eq(NULL, os_getenv_noalloc(name))
     end)
@@ -222,7 +255,7 @@ describe('env.c', function()
     eq(OK, os_unsetenv(name))
     neq(value, os_getenv(name))
     -- Depending on the platform the var might be unset or set as ''
-    assert.True(os_getenv(name) == nil or os_getenv(name) == '')
+    t.ok(os_getenv(name) == nil or os_getenv(name) == '')
     if os_getenv(name) == nil then
       eq(false, os_env_exists(name, false))
     end
@@ -303,8 +336,8 @@ describe('env.c', function()
       local output_buff1 = cstr(255, '')
       local output_buff2 = cstr(255, '')
       local output_expected = 'NVIM_UNIT_TEST_EXPAND_ENV_ESCV/test'
-      cimp.expand_env_esc(input1, output_buff1, 255, false, true, NULL)
-      cimp.expand_env_esc(input2, output_buff2, 255, false, true, NULL)
+      cimp.expand_env_esc(input1, output_buff1, 255, NULL, true, NULL)
+      cimp.expand_env_esc(input2, output_buff2, 255, NULL, true, NULL)
       eq(output_expected, ffi.string(output_buff1))
       eq(output_expected, ffi.string(output_buff2))
     end)
@@ -312,21 +345,21 @@ describe('env.c', function()
     itp('expands ~ once when `one` is true', function()
       local input = '~/foo ~ foo'
       local homedir = cstr(255, '')
-      cimp.expand_env_esc(to_cstr('~'), homedir, 255, false, true, NULL)
+      cimp.expand_env_esc(to_cstr('~'), homedir, 255, NULL, true, NULL)
       local output_expected = ffi.string(homedir) .. '/foo ~ foo'
       local output = cstr(255, '')
-      cimp.expand_env_esc(to_cstr(input), output, 255, false, true, NULL)
+      cimp.expand_env_esc(to_cstr(input), output, 255, NULL, true, NULL)
       eq(ffi.string(output), ffi.string(output_expected))
     end)
 
     itp('expands ~ every time when `one` is false', function()
       local input = to_cstr('~/foo ~ foo')
       local dst = cstr(255, '')
-      cimp.expand_env_esc(to_cstr('~'), dst, 255, false, true, NULL)
+      cimp.expand_env_esc(to_cstr('~'), dst, 255, NULL, true, NULL)
       local homedir = ffi.string(dst)
       local output_expected = homedir .. '/foo ' .. homedir .. ' foo'
       local output = cstr(255, '')
-      cimp.expand_env_esc(input, output, 255, false, false, NULL)
+      cimp.expand_env_esc(input, output, 255, NULL, false, NULL)
       eq(output_expected, ffi.string(output))
     end)
 
@@ -338,10 +371,10 @@ describe('env.c', function()
       local src =
         to_cstr('~' .. curuser .. '/Vcs/django-rest-framework/rest_framework/renderers.py')
       local dst = cstr(256, '~' .. curuser)
-      cimp.expand_env_esc(src, dst, 256, false, false, NULL)
+      cimp.expand_env_esc(src, dst, 256, NULL, false, NULL)
       local len = string.len(ffi.string(dst))
-      assert.True(len > 56)
-      assert.True(len < 256)
+      t.ok(len > 56)
+      t.ok(len < 256)
     end)
 
     itp('respects `dstlen` without expansion', function()
@@ -349,7 +382,7 @@ describe('env.c', function()
       -- The buffer is long enough to actually contain the full input in case the
       -- test fails, but we don't tell expand_env_esc that
       local output = cstr(255, '')
-      cimp.expand_env_esc(input, output, 5, false, true, NULL)
+      cimp.expand_env_esc(input, output, 5, NULL, true, NULL)
       -- Make sure the first few characters are copied properly and that there is a
       -- terminating null character
       for i = 0, 3 do
@@ -368,7 +401,7 @@ describe('env.c', function()
       -- The buffer is long enough to actually contain the full input in case the
       -- test fails, but we don't tell expand_env_esc that
       local output = cstr(255, '')
-      cimp.expand_env_esc(input, output, 5, false, true, NULL)
+      cimp.expand_env_esc(input, output, 5, NULL, true, NULL)
       -- Make sure the first few characters are copied properly and that there is a
       -- terminating null character
       -- expand_env_esc SHOULD NOT expand the variable if there is not enough space to

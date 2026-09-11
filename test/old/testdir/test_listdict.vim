@@ -567,6 +567,8 @@ func Test_dict_literal_keys()
   " why *{} cannot be used for a literal dictionary
   let blue = 'blue'
   call assert_equal('6', trim(execute('echo 2 *{blue: 3}.blue')))
+
+  call assert_fails('eval 1 || #{a:', 'E15:') " used to leak
 endfunc
 
 " Nasty: deepcopy() dict that refers to itself (fails when noref used)
@@ -791,10 +793,7 @@ func Test_dict_item_lock_unlet()
       unlet d.a
       call assert_equal({'b': 100}, d)
   END
-  " TODO: make this work in a :def function
-  "call CheckLegacyAndVim9Success(lines)
-  call CheckTransLegacySuccess(lines)
-  call CheckTransVim9Success(lines)
+  call CheckLegacyAndVim9Success(lines)
 endfunc
 
 " filter() after lock on dict item
@@ -805,10 +804,7 @@ func Test_dict_lock_filter()
       call filter(d, 'v:key != "a"')
       call assert_equal({'b': 100}, d)
   END
-  " TODO: make this work in a :def function
-  "call CheckLegacyAndVim9Success(lines)
-  call CheckTransLegacySuccess(lines)
-  call CheckTransVim9Success(lines)
+  call CheckLegacyAndVim9Success(lines)
 endfunc
 
 " map() after lock on dict
@@ -822,6 +818,17 @@ func Test_dict_lock_map()
   " This won't work in a :def function
   call CheckTransLegacySuccess(lines)
   call CheckTransVim9Success(lines)
+
+  " For a :def function use a global dict.
+  let lines =<< trim END
+      let g:thedict = {'a': 77, 'b': 88}
+      lockvar 1 g:thedict
+      def Delkey()
+        unlet g:thedict.a
+      enddef
+      call Delkey()
+  END
+  " call CheckScriptFailure(lines, 'E741:')
 endfunc
 
 " No extend() after lock on dict item
@@ -1059,6 +1066,14 @@ func Test_reduce()
   " call assert_fails('echo reduce([1], test_null_function())', 'E1132:')
   " Nvim doesn't have null partials
   " call assert_fails('echo reduce([1], test_null_partial())', 'E1132:')
+
+  " did cause double free
+  function! OuterReduce()
+    vim9 echo reduce('ab', 42)
+  endfunction
+  "call assert_fails('call OuterReduce()', 'E1024:')
+  call assert_fails("echo reduce('ab', 'NoSuchFunc')", 'E117:')
+  delfunc OuterReduce
 endfunc
 
 " splitting a string to a List using split()
@@ -1161,7 +1176,12 @@ func Test_listdict_extend()
 
       LET l = [1, 2, 3]
       call extend(l, [4, 5, 6], -3)
-      call assert_equal([4, 5, 6, 1, 2,  3], l)
+      call assert_equal([4, 5, 6, 1, 2, 3], l)
+
+      LET l = [1, 2, 3]
+      call assert_equal([1, 2, 3], l->extend([]))
+      call assert_equal([1, 2, 3], l->extend(v:_null_list))
+      call assert_equal([1, 2, 3], l)
   END
   call CheckLegacyAndVim9Success(lines)
 
@@ -1191,6 +1211,11 @@ func Test_listdict_extend()
       LET d = {'a': 'A', 'b': 9}
       call extend(d, {'b': 0, 'c': 'C'}, "keep")
       call assert_equal({'a': 'A', 'b': 9, 'c': 'C'}, d)
+
+      LET d = {'a': 'A', 'b': 9}
+      call assert_equal({'a': 'A', 'b': 9}, d->extend({}))
+      call assert_equal({'a': 'A', 'b': 9}, d->extend(v:_null_dict))
+      call assert_equal({'a': 'A', 'b': 9}, d)
   END
   call CheckLegacyAndVim9Success(lines)
 
@@ -1234,6 +1259,11 @@ func Test_listdict_extendnew()
   call assert_equal([1, 2, 3], l)
   lockvar l
   call assert_equal([1, 2, 3, 4, 5], extendnew(l, [4, 5]))
+  let l2 = extendnew(l, v:_null_list)
+  call assert_equal([1, 2, 3], l2)
+  let l2 += [4]
+  call assert_equal([1, 2, 3, 4], l2)
+  call assert_equal([1, 2, 3], l)
 
   " Test extendnew() with dictionaries.
   let d = {'a': {'b': 'B'}}
@@ -1241,6 +1271,11 @@ func Test_listdict_extendnew()
   call assert_equal({'a': {'b': 'B'}}, d)
   lockvar d
   call assert_equal({'a': {'b': 'B'}, 'c': 'cc'}, extendnew(d, {'c': 'cc'}))
+  let d2 = extendnew(d, v:_null_dict)
+  call assert_equal({'a': {'b': 'B'}}, d2)
+  let d2['c'] = 'C'
+  call assert_equal({'a': {'b': 'B'}, 'c': 'C'}, d2)
+  call assert_equal({'a': {'b': 'B'}}, d)
 endfunc
 
 func s:check_scope_dict(x, fixed)
@@ -1364,7 +1399,7 @@ func Test_listdict_index()
   call CheckLegacyAndVim9Failure(['VAR d = {"k": 10}', 'echo d[1 : 2]'], 'E719:')
 
   call assert_fails("let v = [4, 6][{-> 1}]", 'E729:')
-  call CheckDefAndScriptFailure(['var v = [4, 6][() => 1]'], ['E1012', 'E703:'])
+  call CheckDefAndScriptFailure(['var v = [4, 6][() => 1]'], ['E1012:', 'E703:'])
 
   call CheckLegacyAndVim9Failure(['VAR v = range(5)[2 : []]'], ['E730:', 'E1012:', 'E730:'])
 

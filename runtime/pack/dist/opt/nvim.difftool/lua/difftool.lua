@@ -3,16 +3,19 @@
 ---:DiffTool {left} {right}                                           *:DiffTool*
 ---Compares two directories or files side-by-side.
 ---Supports directory diffing, rename detection, and highlights changes
----in quickfix list.
+---in quickfix list. Replaces the built-in `nvim -d` diff mode with this interface.
 ---</pre>
 ---
---- The plugin is not loaded by default; use `:packadd nvim.difftool` before invoking `:DiffTool`.
+--- The plugin is not loaded by default; use `:packadd` to activate it:
+--- ```
+--- :packadd nvim.difftool
+--- ```
 ---
---- Example `git difftool -d` integration using `DiffTool` command:
+--- Example `git difftool -d` integration using `nvim -d` replacement:
 ---
 --- ```ini
 --- [difftool "nvim_difftool"]
----   cmd = nvim -c \"packadd nvim.difftool\" -c \"DiffTool $LOCAL $REMOTE\"
+---   cmd = nvim -c \"packadd nvim.difftool\" -d \"$LOCAL\" \"$REMOTE\"
 --- [diff]
 ---   tool = nvim_difftool
 --- ```
@@ -28,7 +31,6 @@ local layout = {
   group = nil,
   left_win = nil,
   right_win = nil,
-  qf_win = nil,
 }
 
 local util = require('vim._core.util')
@@ -42,7 +44,6 @@ local function cleanup_layout(with_qf)
   end
   layout.left_win = nil
   layout.right_win = nil
-  layout.qf_win = nil
 
   if with_qf then
     vim.fn.setqflist({})
@@ -55,9 +56,8 @@ end
 local function setup_layout(with_qf)
   local left_valid = layout.left_win and vim.api.nvim_win_is_valid(layout.left_win)
   local right_valid = layout.right_win and vim.api.nvim_win_is_valid(layout.right_win)
-  local qf_valid = layout.qf_win and vim.api.nvim_win_is_valid(layout.qf_win)
 
-  if left_valid and right_valid and (not with_qf or qf_valid) then
+  if left_valid and right_valid then
     return false
   end
 
@@ -68,9 +68,6 @@ local function setup_layout(with_qf)
 
   if with_qf then
     vim.cmd('botright copen')
-    layout.qf_win = vim.api.nvim_get_current_win()
-  else
-    layout.qf_win = nil
   end
   vim.api.nvim_set_current_win(layout.right_win)
 
@@ -89,20 +86,6 @@ local function setup_layout(with_qf)
       cleanup_layout(with_qf)
     end,
   })
-  if with_qf then
-    vim.api.nvim_create_autocmd('WinClosed', {
-      group = layout.group,
-      pattern = tostring(layout.qf_win),
-      callback = function()
-        -- For quickfix also close one of diff windows
-        if layout.left_win and vim.api.nvim_win_is_valid(layout.left_win) then
-          vim.api.nvim_win_close(layout.left_win, true)
-        end
-
-        cleanup_layout(with_qf)
-      end,
-    })
-  end
 end
 
 --- Diff two files
@@ -134,11 +117,13 @@ local function diff_dirs_diffr(left_dir, right_dir, opt)
   table.insert(args, left_dir)
   table.insert(args, right_dir)
 
-  local lines = vim.fn.systemlist(args)
+  -- Force English locale so that we can rely on the output format
+  local result = vim.system(args, { text = true, env = { LC_ALL = 'C' } }):wait()
+  local lines = vim.split(result.stdout or '', '\n', { trimempty = true })
   local qf_entries = {}
 
   for _, line in ipairs(lines) do
-    local modified_left, modified_right = line:match('^Files (.+) and (.+) differ$')
+    local modified_left, modified_right = line:match("^Files '?(.-)'? and '?(.-)'? differ$")
     if modified_left and modified_right then
       local left_exists = vim.fn.filereadable(modified_left) == 1
       local right_exists = vim.fn.filereadable(modified_right) == 1
@@ -276,7 +261,7 @@ local function diff_dirs_builtin(left_dir, right_dir, opt)
   -- Detect possible renames
   if opt.rename.detect then
     for left_rel, left_path in pairs(left_only) do
-      ---@type {similarity: number, path: string?, rel: string}
+      ---@type {similarity: number, path: string?, rel: string?}
       local best_match = { similarity = opt.rename.similarity, path = nil }
 
       for right_rel, right_path in pairs(right_only) do
@@ -366,6 +351,12 @@ local function diff_dirs(left_dir, right_dir, opt)
     qf_entries = diff_dirs_builtin(left_dir, right_dir, opt)
   else
     vim.notify('Unknown diff method: ' .. method, vim.log.levels.ERROR)
+    return
+  end
+
+  -- Early exit if no differences found
+  if #qf_entries == 0 then
+    vim.notify('No differences found', vim.log.levels.INFO)
     return
   end
 
@@ -461,20 +452,20 @@ function M.open(left, right, opt)
   vim.api.nvim_create_autocmd('BufWinEnter', {
     group = layout.group,
     pattern = 'quickfix',
-    callback = function(args)
+    callback = function(ev)
       if not get_diff_entry() then
         return
       end
 
-      vim.api.nvim_buf_clear_namespace(args.buf, hl_id, 0, -1)
-      local lines = vim.api.nvim_buf_get_lines(args.buf, 0, -1, false)
+      vim.api.nvim_buf_clear_namespace(ev.buf, hl_id, 0, -1)
+      local lines = vim.api.nvim_buf_get_lines(ev.buf, 0, -1, false)
 
       -- Map status codes to highlight groups
       for i, line in ipairs(lines) do
         local status = line:match('^(%a) ')
         local hl_group = highlight_groups[status]
         if hl_group then
-          vim.hl.range(args.buf, hl_id, hl_group, { i - 1, 0 }, { i - 1, 1 })
+          vim.hl.range(ev.buf, hl_id, hl_group, { i - 1, 0 }, { i - 1, 1 })
         end
       end
     end,
@@ -483,15 +474,15 @@ function M.open(left, right, opt)
   vim.api.nvim_create_autocmd('BufWinEnter', {
     group = layout.group,
     pattern = '*',
-    callback = function(args)
-      local entry = get_diff_entry(args.buf)
+    callback = function(ev)
+      local entry = get_diff_entry(ev.buf)
       if not entry then
         return
       end
 
       vim.w.lazyredraw = true
       vim.schedule(function()
-        diff_files(entry.user_data.left, entry.user_data.right, true)
+        diff_files(entry.user_data.left, entry.user_data.right)
         vim.w.lazyredraw = false
       end)
     end,

@@ -1,6 +1,7 @@
 local t = require('test.testutil')
 local n = require('test.functional.testnvim')()
 
+local describe, it, before_each = t.describe, t.it, t.before_each
 local clear = n.clear
 local command = n.command
 local dedent = t.dedent
@@ -86,7 +87,6 @@ describe('tabpage/previous', function()
 
       eq(
         dedent([=[
-
           Tab page 1
               [No Name]
           Tab page 2
@@ -137,7 +137,6 @@ describe('tabpage/previous', function()
       feed(characters)
       eq(
         dedent([=[
-
          Tab page 1
              [No Name]
          Tab page 2
@@ -189,7 +188,6 @@ describe('tabpage/previous', function()
 
       eq(
         dedent([=[
-
          Tab page 1
          #   [No Name]
          Tab page 2
@@ -241,7 +239,6 @@ describe('tabpage/previous', function()
 
       eq(
         dedent([=[
-
          Tab page 1
          >   [No Name]
          Tab page 2
@@ -291,7 +288,6 @@ describe('tabpage/previous', function()
 
       eq(
         dedent([=[
-
          Tab page 1
              [No Name]
          Tab page 2
@@ -343,7 +339,6 @@ describe('tabpage/previous', function()
 
       eq(
         dedent([=[
-
          Tab page 1
          #   [No Name]
          Tab page 2
@@ -393,7 +388,6 @@ describe('tabpage/previous', function()
 
       eq(
         dedent([=[
-
          Tab page 1
              [No Name]
          Tab page 2
@@ -445,7 +439,6 @@ describe('tabpage/previous', function()
 
       eq(
         dedent([=[
-
          Tab page 1
              [No Name]
          Tab page 2
@@ -544,7 +537,6 @@ describe('tabpage/previous', function()
 
       eq(
         dedent([=[
-
          Tab page 1
              [No Name]
          Tab page 2
@@ -627,7 +619,7 @@ describe('tabpage/previous', function()
   -- it('does not switch to previous via :tabn #<CR> after entering operator pending',
   --   does_not_switch_to_previous_after_entering_operator_pending(':tabn #<CR>'))
 
-  local function cmdline_win_prevents_tab_switch(characters, completion_visible)
+  local function cmdwin_allows_tab_switch(characters)
     return function()
       -- Add three tabs for a total of four
       command('tabnew')
@@ -642,30 +634,19 @@ describe('tabpage/previous', function()
 
       local cmdline_win_id = eval('win_getid()')
 
-      -- At this point switching to the previous tab should have no effect.
+      -- Switching to the previous tab now works.
       feed(characters)
 
-      -- Attempting to switch tabs maintains the current window.
-      eq(cmdline_win_id, eval('win_getid()'))
-      eq(completion_visible, eval('complete_info().pum_visible'))
-
-      -- The current tab is still the fourth.
-      eq(4, eval('tabpagenr()'))
-
-      -- The previous tab is still the third.
-      eq(3, eval("tabpagenr('#')"))
+      -- Focus moved out of the cmdwin to the previous (third) tab.
+      t.neq(cmdline_win_id, eval('win_getid()'))
+      eq(3, eval('tabpagenr()'))
     end
   end
-  it('cmdline-win prevents tab switch via g<Tab>', cmdline_win_prevents_tab_switch('g<Tab>', 0))
-  it(
-    'cmdline-win prevents tab switch via <C-W>g<Tab>',
-    cmdline_win_prevents_tab_switch('<C-W>g<Tab>', 1)
-  )
-  it('cmdline-win prevents tab switch via <C-Tab>', cmdline_win_prevents_tab_switch('<C-Tab>', 0))
-  it(
-    'cmdline-win prevents tab switch via :tabn #<CR>',
-    cmdline_win_prevents_tab_switch(':tabn #<CR>', 0)
-  )
+
+  it('cmdwin allows tab switch via g<Tab>', cmdwin_allows_tab_switch('g<Tab>'))
+  it('cmdwin allows tab switch via <C-W>g<Tab>', cmdwin_allows_tab_switch('<C-W>g<Tab>'))
+  it('cmdwin allows tab switch via <C-Tab>', cmdwin_allows_tab_switch('<C-Tab>'))
+  it('cmdwin allows tab switch via :tabn #<CR>', cmdwin_allows_tab_switch(':tabn #<CR>'))
 
   it(':tabs indicates correct prevtab curwin', function()
     -- Add three tabs for a total of four
@@ -681,7 +662,6 @@ describe('tabpage/previous', function()
 
     eq(
       dedent([=[
-
          Tab page 1
              [No Name]
          Tab page 2

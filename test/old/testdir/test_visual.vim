@@ -505,8 +505,10 @@ func Test_visual_mode_op()
 
   call setline(1, 'apple banana cherry')
   call cursor(1, 1)
+  " Nvim: "." re-executes the captured keysequence (|visual-repeat|): the final
+  " "." replays "3vd", multiplying the previous (grown) selection again.
   normal lvld.l3vd.
-  call assert_equal('a y', getline(1))
+  call assert_equal('a ', getline(1))
 
   call setline(1, ['line 1 line 1', 'line 2 line 2', 'line 3 line 3',
         \ 'line 4 line 4', 'line 5 line 5', 'line 6 line 6'])
@@ -518,10 +520,10 @@ func Test_visual_mode_op()
   call setline(1, ['xxxxxxxxxxxxx', 'xxxxxxxxxxxxx', 'xxxxxxxxxxxxx',
         \ 'xxxxxxxxxxxxx'])
   exe "normal \<C-V>jlc  \<Esc>l.l2\<C-V>c----\<Esc>l."
-  call assert_equal(['    --------x',
-        \ '    --------x',
-        \ 'xxxx--------x',
-        \ 'xxxx--------x'], getline(1, '$'))
+  call assert_equal(['    --------',
+        \ '    --------',
+        \ 'xxxx--------',
+        \ 'xxxx--------'], getline(1, '$'))
 
   bwipe!
 endfunc
@@ -545,15 +547,18 @@ func Test_visual_mode_maps()
   vnoremap W /\u/s-1<CR>
   vnoremap iW :<C-U>call SelectInCaps()<CR>
 
+  " Nvim: a selection extended by a search or Ex motion is not replayable:
+  " "." falls back to an equal-size reselect ("1v"), like Vim. But "." after
+  " "2vd" re-executes "2vd", multiplying the previous (grown) area again.
   call setline(1, 'KiwiRaspberryDateWatermelonPeach')
   call cursor(1, 1)
   exe "normal vWcNo\<Esc>l.fD2vd."
-  call assert_equal('NoNoberryach', getline(1))
+  call assert_equal('NoNo', getline(1))
 
   call setline(1, 'JambuRambutanBananaTangerineMango')
   call cursor(1, 1)
   exe "normal llviWc-\<Esc>l.l2vdl."
-  call assert_equal('--ago', getline(1))
+  call assert_equal('--a', getline(1))
 
   vunmap W
   vunmap iW
@@ -1008,6 +1013,28 @@ func Test_virtualedit_visual_block()
   bwipe!
 endfunc
 
+func Test_virtualedit_visual_block_reselect()
+  set ve=all
+  new
+  call append(0, ['###', '###', '###', '#####'])
+  call cursor(1, 1)
+  exe "norm! \<C-V>lljj"
+  call assert_equal([0, 3, 3, 0], getpos('.'))
+  call assert_equal([0, 1, 1, 0], getpos('v'))
+  norm! y
+  call assert_equal(['###', '###', '###'], getreg('"', v:true, v:true))
+  call cursor(2, 6)
+  call assert_equal([0, 2, 4, 2], getpos('.'))
+  norm! 1v
+  call assert_equal([0, 4, 6, 2], getpos('.'))
+  call assert_equal([0, 2, 4, 2], getpos('v'))
+  norm! r!
+  call assert_equal(['###  !!!', '###  !!!', '#####!!!'], getline(2, 4))
+
+  bwipe!
+  set ve&
+endfunc
+
 " Test for changing case
 func Test_visual_change_case()
   new
@@ -1321,10 +1348,11 @@ func Test_visual_block_with_virtualedit()
     set virtualedit=block
     normal G
   END
-  call writefile(lines, 'XTest_block')
+  call writefile(lines, 'XTest_block', 'D')
 
   let buf = RunVimInTerminal('-S XTest_block', {'rows': 8, 'cols': 50})
   call term_sendkeys(buf, "\<C-V>gg$")
+  call WaitForAssert({-> assert_match('VISUAL.*\dx\d', term_getline(buf, 8))}, 1000)
   call VerifyScreenDump(buf, 'Test_visual_block_with_virtualedit', {})
 
   call term_sendkeys(buf, "\<Esc>gg\<C-V>G$")
@@ -1333,7 +1361,6 @@ func Test_visual_block_with_virtualedit()
   " clean up
   call term_sendkeys(buf, "\<Esc>")
   call StopVimInTerminal(buf)
-  call delete('XTest_block')
 endfunc
 
 func Test_visual_block_ctrl_w_f()
@@ -2610,12 +2637,12 @@ endfunc
 
 func Test_getregion_invalid_buf()
   new
-  help
-  call cursor(5, 7)
+  help index
+  call cursor(7, 6)
   norm! mA
-  call cursor(5, 18)
+  call cursor(7, 18)
   norm! mB
-  call assert_equal(['Move around:'], getregion(getpos("'A"), getpos("'B")))
+  call assert_equal(['file contains'], getregion(getpos("'A"), getpos("'B")))
   " close the help window
   q
   call assert_fails("call getregion(getpos(\"'A\"), getpos(\"'B\"))", 'E681:')
@@ -2824,6 +2851,162 @@ func Test_visual_pos_buffer_heap_overflow()
   normal! [P
   set virtualedit=
   bw! Xa Xb
+endfunc
+
+" Test visual block pos update after block insert and gv
+func Test_visual_block_pos_update()
+  new
+  set virtualedit=block
+  call setline(1, ['aacccc', 'bb'])
+  exe "norm! e\<C-v>jAa\<Esc>gv"
+  call assert_equal([[0, 1, 6, 0], [0 , 2, 6, 0]], [getpos("v"), getpos(".")])
+  normal! kj
+  call assert_equal([[0, 1, 6, 0], [0 , 2, 6, 0]], [getpos("v"), getpos(".")])
+  set virtualedit=
+  bw!
+endfunc
+
+" Test that blockwise end position matches getpos('.')
+" when 'wrap' and 'linebreak' are set
+func Test_getregionpos_block_linebreak_matches_getpos()
+  CheckFeature linebreak
+
+  new
+  setlocal buftype=
+  setlocal bufhidden=wipe
+  setlocal noswapfile
+
+  setlocal wrap
+  setlocal linebreak
+  setlocal breakat=\ \t
+  setlocal nonumber norelativenumber
+  setlocal signcolumn=no
+  setlocal foldcolumn=0
+
+  call setline(1, '1111111111 2222222222 3333333333 4444444444 5555555555 6666666666 7777777777 8888888888')
+
+  " Force wrapping deterministically by shrinking the screen width.
+  let save_columns = &columns
+  let moved = 0
+  for c in [30, 20, 15, 10]
+    execute 'set columns=' .. c
+    redraw!
+    normal! gg0
+    let row0 = winline()
+    normal! gj
+    let row1 = winline()
+    if row1 > row0
+      let moved = 1
+      break
+    endif
+  endfor
+  call assert_true(moved)
+
+  " Move a bit right so we are not at column 1, then go back up one screen line.
+  normal! 5l
+  normal! gk
+  let row2 = winline()
+  call assert_equal(row0, row2)
+
+  " Start Visual block and move down one screen line to the previous position.
+  execute "normal! \<C-V>"
+  normal! gj
+  let row3 = winline()
+  call assert_equal(row1, row3)
+
+  let p1 = getpos('v')
+  let p2 = getpos('.')
+
+  " Sanity: block selection is within the same wrapped buffer line.
+  call assert_equal(1, p1[1])
+  call assert_equal(1, p2[1])
+
+  " For blockwise region, getregionpos() should not report an end position
+  " different from the {pos2} we passed in.
+  let segs = getregionpos(p1, p2, #{ type: "\<C-V>", exclusive: v:false })
+
+  call assert_equal(1, len(segs))
+  let endp = segs[0][1]
+
+  call assert_equal(p2[1], endp[1])  " lnum
+  call assert_equal(p2[2], endp[2])  " col
+  call assert_equal(p2[3], endp[3])  " off
+
+  let &columns = save_columns
+  bw!
+endfunc
+
+func Test_visual_ended_in_wiped_buffer()
+  edit Xfoo
+  edit Xbar
+  setlocal bufhidden=wipe
+  augroup testing
+    autocmd BufWipeout * ++once normal! v
+  augroup END
+  " Must be the last window.
+  call assert_equal(1, winnr('$'))
+  call assert_equal(1, tabpagenr('$'))
+  " Was a member access on a NULL curbuf from Vim ending Visual mode.
+  buffer #
+  call assert_equal(0, bufexists('Xbar'))
+  call assert_equal('n', mode())
+
+  autocmd! testing
+  %bw!
+endfunc
+
+func Test_visual_ended_in_unloaded_buffer()
+  throw 'Skipped: needs clipboard=autoselect'
+  CheckFeature clipboard
+  CheckNotGui
+  set clipboard+=autoselect
+  edit Xfoo
+  edit Xbar
+  call setline(1, 'hi')
+  setlocal nomodified
+  let s:fired = 0
+  augroup testing
+    autocmd BufUnload Xbar call assert_equal('Xbar', bufname())
+          \| execute 'normal! V'
+          \| call assert_equal('V', mode())
+
+    " From Vim ending Visual mode.  Used to occur too late, after the buffer was
+    " unloaded, so @* didn't contain the selection.  Window also had a NULL
+    " w_buffer here!
+    autocmd TextYankPost * ++once let s:fired = 1
+          \| if has('clipboard_working') | call assert_equal("hi\n", @*) | endif
+          \| call tabpagebuflist() " was a NULL member access on w_buffer
+  augroup END
+
+  buffer Xfoo
+  call assert_equal(0, bufloaded('Xbar'))
+  call assert_equal('n', mode())
+  call assert_equal(1, s:fired)
+
+  augroup testing
+    autocmd!
+    autocmd BufHidden Xfoo ++once call assert_equal('Xfoo', bufname())
+          \| execute 'normal! v'
+          \| call assert_equal('v', mode())
+
+    " Check b_nwindows is not decremented too early when Visual mode ends in a
+    " loaded buffer.  Buffer should not be considered hidden in TextYankPost, as
+    " by that point it's still loaded and displayed in the current window.
+    autocmd TextYankPost * ++once let s:fired = 2
+          \| call assert_equal(1, bufloaded(bufnr()))
+          \| call assert_equal(0, getbufinfo(bufnr())[0].hidden)
+  augroup END
+  edit Xbar
+  edit Xfoo
+  only
+  hide buffer #
+  call assert_equal('n', mode())
+  call assert_equal(2, s:fired)
+
+  autocmd! testing
+  unlet! s:fired
+  set clipboard&
+  %bw!
 endfunc
 
 " vim: shiftwidth=2 sts=2 expandtab

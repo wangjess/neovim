@@ -2,6 +2,7 @@ local t = require('test.testutil')
 local n = require('test.functional.testnvim')()
 local Screen = require('test.functional.ui.screen')
 
+local describe, it, before_each, setup = t.describe, t.it, t.before_each, t.setup
 local clear, eq, neq = n.clear, t.eq, t.neq
 local command, api, fn = n.command, n.api, n.fn
 local tbl_deep_extend = vim.tbl_deep_extend
@@ -105,7 +106,7 @@ describe('screenchar() and family respect floating windows', function()
     end)
 
     it('from ui2', function()
-      n.exec_lua('require("vim._extui").enable({ enable = true })')
+      n.exec_lua('require("vim._core.ui2").enable({ enable = true })')
       command('echo "foo"')
 
       assert_screen_funcs()

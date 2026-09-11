@@ -36,8 +36,8 @@ vim.api.nvim_create_autocmd('UIEnter', {
     vim.api.nvim_create_autocmd('TermResponse', {
       group = id,
       nested = true,
-      callback = function(args)
-        local resp = args.data.sequence ---@type string
+      callback = function(ev)
+        local resp = ev.data.sequence ---@type string
         local params = resp:match('^\027%[%?([%d;]+)c$')
         if params then
           -- Check termfeatures again, it may have changed between the query and response.
@@ -60,7 +60,7 @@ vim.api.nvim_create_autocmd('UIEnter', {
           end
 
           -- Fallback to XTGETTCAP
-          require('vim.termcap').query('Ms', function(cap, found, seq)
+          vim.tty.query('Ms', function(cap, found, seq)
             if not found then
               return
             end

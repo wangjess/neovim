@@ -147,6 +147,14 @@ typedef struct {
 } syn_opt_arg_T;
 
 typedef struct {
+  int16_t *idl_key;    ///< the list this entry resolves (NULL when empty)
+  int16_t *idl_ids;    ///< sorted, cluster-expanded group IDs (allocated)
+  int idl_count;       ///< number of IDs in idl_ids
+  int16_t idl_marker;  ///< leading ALLBUT/TOP/CONTAINED item, or 0
+  bool idl_usable;     ///< false: not cacheable, use the slow path
+} idl_entry_T;
+
+typedef struct {
   proftime_T total;
   int count;
   int match;
@@ -228,9 +236,8 @@ static int running_syn_inc_tag = 0;
 // KE2HIKEY() converts a var pointer to a hashitem key pointer.
 // HIKEY2KE() converts a hashitem key pointer to a var pointer.
 // HI2KE() converts a hashitem pointer to a var pointer.
-static keyentry_T dumkey;
 #define KE2HIKEY(kp)  ((kp)->keyword)
-#define HIKEY2KE(p)   ((keyentry_T *)((p) - (dumkey.keyword - (char *)&dumkey)))
+#define HIKEY2KE(p)   ((keyentry_T *)((p) - offsetof(keyentry_T, keyword)))
 #define HI2KE(hi)      HIKEY2KE((hi)->hi_key)
 
 // To reduce the time spent in keepend(), remember at which level in the state
@@ -679,6 +686,8 @@ static void syn_sync(win_T *wp, linenr_T start_lnum, synstate_T *last_valid)
         // the next line.
         // For "groupthere" the parsing starts at start_lnum.
         if (found_flags & HL_SYNC_HERE) {
+          current_lnum = found_m_endpos.lnum;
+          current_col = found_m_endpos.col;
           if (!GA_EMPTY(&current_state)) {
             cur_si = &CUR_STATE(current_state.ga_len - 1);
             cur_si->si_h_startpos.lnum = found_current_lnum;
@@ -686,8 +695,6 @@ static void syn_sync(win_T *wp, linenr_T start_lnum, synstate_T *last_valid)
             update_si_end(cur_si, (int)current_col, true);
             check_keepend();
           }
-          current_col = found_m_endpos.col;
-          current_lnum = found_m_endpos.lnum;
           syn_finish_line(false);
           current_lnum++;
         } else {
@@ -866,6 +873,9 @@ static void syn_update_ends(bool startofline)
 
 static void syn_stack_free_block(synblock_T *block)
 {
+  // Syntax definitions may have changed: drop the in_id_list() cache.
+  idl_cache_clear(block);
+
   if (block->b_sst_array == NULL) {
     return;
   }
@@ -875,6 +885,7 @@ static void syn_stack_free_block(synblock_T *block)
   }
   XFREE_CLEAR(block->b_sst_array);
   block->b_sst_first = NULL;
+  block->b_sst_search = NULL;
   block->b_sst_len = 0;
 }
 // Free b_sst_array[] for buffer "buf".
@@ -955,6 +966,8 @@ static void syn_stack_alloc(void)
     xfree(syn_block->b_sst_array);
     syn_block->b_sst_array = sstp;
     syn_block->b_sst_len = len;
+    // The entries were moved to a new array, drop the stale pointer.
+    syn_block->b_sst_search = NULL;
   }
 }
 
@@ -1072,6 +1085,9 @@ static bool syn_stack_cleanup(void)
 // Move the entry into the free list.
 static void syn_stack_free_entry(synblock_T *block, synstate_T *p)
 {
+  if (block->b_sst_search == p) {
+    block->b_sst_search = NULL;
+  }
   clear_syn_state(p);
   p->sst_next = block->b_sst_firstfree;
   block->b_sst_firstfree = p;
@@ -1083,13 +1099,26 @@ static void syn_stack_free_entry(synblock_T *block, synstate_T *p)
 static synstate_T *syn_stack_find_entry(linenr_T lnum)
 {
   synstate_T *prev = NULL;
-  for (synstate_T *p = syn_block->b_sst_first; p != NULL; prev = p, p = p->sst_next) {
+  synstate_T *p = syn_block->b_sst_first;
+
+  // The list is sorted by line number and lookups while parsing advance
+  // monotonically, so resume from the last returned entry instead of
+  // rescanning from the start whenever it is at or before "lnum".
+  if (syn_block->b_sst_search != NULL && syn_block->b_sst_search->sst_lnum <= lnum) {
+    p = syn_block->b_sst_search;
+  }
+
+  for (; p != NULL; prev = p, p = p->sst_next) {
     if (p->sst_lnum == lnum) {
+      syn_block->b_sst_search = p;
       return p;
     }
     if (p->sst_lnum > lnum) {
       break;
     }
+  }
+  if (prev != NULL) {
+    syn_block->b_sst_search = prev;
   }
   return prev;
 }
@@ -1165,6 +1194,8 @@ static synstate_T *store_current_state(void)
       sp = p;
       sp->sst_stacksize = 0;
       sp->sst_lnum = current_lnum;
+      // Resume the next forward lookup from the entry just stored.
+      syn_block->b_sst_search = sp;
     }
   }
   if (sp != NULL) {
@@ -3212,6 +3243,7 @@ static void syn_cmd_list(exarg_T *eap, int syncing)
     return;
   }
 
+  msg_ext_set_kind("list_cmd");
   if (!syntax_present(curwin)) {
     msg(_(msg_no_items), 0);
     return;
@@ -3222,8 +3254,19 @@ static void syn_cmd_list(exarg_T *eap, int syncing)
       msg_puts(_("syncing on C-style comments"));
       syn_lines_msg();
       syn_match_msg();
-      return;
-    } else if (!(curwin->w_s->b_syn_sync_flags & SF_MATCH)) {
+    } else if (curwin->w_s->b_syn_sync_flags & SF_MATCH) {
+      msg_puts_title(_("\n--- Syntax sync items ---"));
+      if (curwin->w_s->b_syn_sync_minlines > 0
+          || curwin->w_s->b_syn_sync_maxlines > 0
+          || curwin->w_s->b_syn_sync_linebreaks > 0) {
+        msg_puts(_("\nsyncing on items"));
+        syn_lines_msg();
+        syn_match_msg();
+      }
+      for (int id = 1; id <= highlight_num_groups() && !got_int; id++) {
+        syn_list_one(id, syncing, false);
+      }
+    } else {
       if (curwin->w_s->b_syn_sync_minlines == 0) {
         msg_puts(_("no syncing"));
       } else {
@@ -3236,19 +3279,11 @@ static void syn_cmd_list(exarg_T *eap, int syncing)
         }
         syn_match_msg();
       }
-      return;
     }
-    msg_puts_title(_("\n--- Syntax sync items ---"));
-    if (curwin->w_s->b_syn_sync_minlines > 0
-        || curwin->w_s->b_syn_sync_maxlines > 0
-        || curwin->w_s->b_syn_sync_linebreaks > 0) {
-      msg_puts(_("\nsyncing on items"));
-      syn_lines_msg();
-      syn_match_msg();
-    }
-  } else {
-    msg_puts_title(_("\n--- Syntax items ---"));
+    return;
   }
+
+  msg_puts_title(_("\n--- Syntax items ---"));
   if (ends_excmd(*arg)) {
     // No argument: List all group IDs and all syntax clusters.
     for (int id = 1; id <= highlight_num_groups() && !got_int; id++) {
@@ -3985,6 +4020,8 @@ static void syn_cmd_include(exarg_T *eap, int syncing)
       }
       return;
     }
+  } else {
+    TO_SLASH(eap->arg);
   }
 
   // Save and restore the existing top-level grouplist id and ":syn
@@ -5089,6 +5126,161 @@ static int16_t *copy_id_list(const int16_t *const list)
   return retval;
 }
 
+/// Cache for in_id_list() {{{
+///
+/// A "contains"/cluster list is otherwise scanned with recursive cluster
+/// expansion on every check.  Each distinct list is resolved once into a
+/// cluster-expanded, sorted set of group IDs so membership becomes a binary
+/// search.  The cache lives in the synblock and is cleared by
+/// syn_stack_free_block() when syntax definitions change (which also covers
+/// list pointer reuse).
+#define IDL_CACHE_SIZE 16
+
+typedef struct {
+  idl_entry_T ent[IDL_CACHE_SIZE];
+  int round;  ///< round-robin replacement index
+  int last;   ///< index of the last returned entry (fast path)
+} idl_cache_T;
+
+/// Collect the explicit group IDs of "list" into "ga", expanding clusters.
+/// "seen" records visited clusters to break cycles and avoid duplicate work.
+/// Return false when the list cannot be represented as a plain set (a nested
+/// ALLBUT/TOP/CONTAINED marker) or on out of memory.
+static bool idl_collect(int16_t *list, garray_T *ga, garray_T *seen)
+{
+  if (list == NULL || list == ID_LIST_ALL) {
+    return false;
+  }
+  for (int16_t item = *list; item != 0; item = *++list) {
+    if (item >= SYNID_ALLBUT && item < SYNID_CLUSTER) {
+      return false;  // nested ALLBUT/TOP/CONTAINED: not cacheable
+    }
+    if (item >= SYNID_CLUSTER) {
+      bool seen_it = false;
+
+      for (int i = 0; i < seen->ga_len; i++) {
+        if (((int16_t *)seen->ga_data)[i] == item) {
+          seen_it = true;
+          break;
+        }
+      }
+      if (seen_it) {
+        continue;
+      }
+      GA_APPEND(int16_t, seen, item);
+      // Record the cluster id itself, not just its members: the slow
+      // path matches "item == id" for a cluster id present in the list.
+      GA_APPEND(int16_t, ga, item);
+      int16_t *scl_list = SYN_CLSTR(syn_block)[item - SYNID_CLUSTER].scl_list;
+      if (scl_list != NULL && !idl_collect(scl_list, ga, seen)) {
+        return false;
+      }
+    } else {
+      GA_APPEND(int16_t, ga, item);
+    }
+  }
+  return true;
+}
+
+static int idl_id_cmp(const void *a, const void *b)
+{
+  return (int)(*(const int16_t *)a) - (int)(*(const int16_t *)b);
+}
+
+/// Get the cache entry that resolves "list", building it if needed.
+/// Returns NULL only on allocation failure.
+static idl_entry_T *idl_get_entry(int16_t *list)
+{
+  idl_cache_T *cache = (idl_cache_T *)syn_block->b_idlist_cache;
+
+  if (cache == NULL) {
+    cache = xcalloc(1, sizeof(idl_cache_T));
+    syn_block->b_idlist_cache = cache;
+  }
+  // Fast path: the same list is usually queried many times in a row.
+  if (cache->ent[cache->last].idl_key == list) {
+    return &cache->ent[cache->last];
+  }
+  for (int i = 0; i < IDL_CACHE_SIZE; i++) {
+    if (cache->ent[i].idl_key == list) {
+      cache->last = i;
+      return &cache->ent[i];
+    }
+  }
+
+  // Build a new entry, replacing one in round-robin order.
+  cache->last = cache->round;
+  idl_entry_T *e = &cache->ent[cache->round];
+  cache->round = (cache->round + 1) % IDL_CACHE_SIZE;
+  XFREE_CLEAR(e->idl_ids);
+  e->idl_count = 0;
+  e->idl_key = list;
+  e->idl_marker = 0;
+  e->idl_usable = true;
+
+  // A leading ALLBUT/TOP/CONTAINED marker is kept aside; the rest is the set.
+  if (*list >= SYNID_ALLBUT && *list < SYNID_CLUSTER) {
+    e->idl_marker = *list;
+    list++;
+  }
+
+  garray_T ga, seen;
+  ga_init(&ga, sizeof(int16_t), 50);
+  ga_init(&seen, sizeof(int16_t), 10);
+  if (!idl_collect(list, &ga, &seen)) {
+    e->idl_usable = false;
+    ga_clear(&ga);
+    ga_clear(&seen);
+    return e;
+  }
+  ga_clear(&seen);
+  if (ga.ga_len > 0) {
+    qsort(ga.ga_data, (size_t)ga.ga_len, sizeof(int16_t), idl_id_cmp);
+    e->idl_ids = (int16_t *)ga.ga_data;  // take ownership
+    e->idl_count = ga.ga_len;
+  } else {
+    ga_clear(&ga);
+  }
+  return e;
+}
+
+/// Return true if "id" is in the resolved set of cache entry "e".
+static bool idl_contains(idl_entry_T *e, int16_t id)
+{
+  int lo = 0;
+  int hi = e->idl_count - 1;
+
+  while (lo <= hi) {
+    int mid = (lo + hi) / 2;
+    int16_t v = e->idl_ids[mid];
+
+    if (v == id) {
+      return true;
+    }
+    if (v < id) {
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  return false;
+}
+
+static void idl_cache_clear(synblock_T *block)
+{
+  idl_cache_T *cache = (idl_cache_T *)block->b_idlist_cache;
+
+  if (cache == NULL) {
+    return;
+  }
+  for (int i = 0; i < IDL_CACHE_SIZE; i++) {
+    xfree(cache->ent[i].idl_ids);
+  }
+  xfree(cache);
+  block->b_idlist_cache = NULL;
+}
+// }}}
+
 /// Check if syntax group "ssp" is in the ID list "list" of "cur_si".
 /// "cur_si" can be NULL if not checking the "containedin" list.
 /// Used to check if a syntax item is in the "contains" or "nextgroup" list of
@@ -5137,6 +5329,34 @@ static int in_id_list(stateitem_T *cur_si, int16_t *list, struct sp_syn *ssp, in
   // unconditionally.
   bool toplevel = !(flags & HL_CONTAINED) || (flags & HL_INCLUDED_TOPLEVEL);
 
+  // Fast path: use the resolved, sorted set cached for this list.  Only the
+  // leading ALLBUT/TOP/CONTAINED gate depends on "ssp"/"flags", so it is
+  // applied here; membership itself is a binary search.
+  idl_entry_T *e = idl_get_entry(list);
+  if (e != NULL && e->idl_usable) {
+    if (e->idl_marker != 0) {
+      int16_t item = e->idl_marker;
+      if (item < SYNID_TOP) {
+        if (item - SYNID_ALLBUT != ssp->inc_tag) {
+          return false;
+        }
+      } else if (item < SYNID_CONTAINED) {
+        if (item - SYNID_TOP != ssp->inc_tag || !toplevel) {
+          return false;
+        }
+      } else {
+        if (item - SYNID_CONTAINED != ssp->inc_tag || toplevel) {
+          return false;
+        }
+      }
+      retval = false;
+    } else {
+      retval = true;
+    }
+    return idl_contains(e, id) ? retval : !retval;
+  }
+
+  // Slow path (uncacheable list, e.g. a nested ALLBUT).
   // If the first item is "ALLBUT", return true if "id" is NOT in the
   // contains list.  We also require that "id" is at the same ":syn include"
   // level as the list.
@@ -5346,22 +5566,22 @@ void set_context_in_syntax_cmd(expand_T *xp, const char *arg)
   xp->xp_pattern = skipwhite(p);
   if (*skiptowhite(xp->xp_pattern) != NUL) {
     xp->xp_context = EXPAND_NOTHING;
-  } else if (STRNICMP(arg, "case", p - arg) == 0) {
+  } else if (STRNICMP(arg, "case", (size_t)(p - arg)) == 0) {
     expand_what = EXP_CASE;
-  } else if (STRNICMP(arg, "spell", p - arg) == 0) {
+  } else if (STRNICMP(arg, "spell", (size_t)(p - arg)) == 0) {
     expand_what = EXP_SPELL;
-  } else if (STRNICMP(arg, "sync", p - arg) == 0) {
+  } else if (STRNICMP(arg, "sync", (size_t)(p - arg)) == 0) {
     expand_what = EXP_SYNC;
-  } else if (STRNICMP(arg, "list", p - arg) == 0) {
+  } else if (STRNICMP(arg, "list", (size_t)(p - arg)) == 0) {
     p = skipwhite(p);
     if (*p == '@') {
       expand_what = EXP_CLUSTER;
     } else {
       xp->xp_context = EXPAND_HIGHLIGHT;
     }
-  } else if (STRNICMP(arg, "keyword", p - arg) == 0
-             || STRNICMP(arg, "region", p - arg) == 0
-             || STRNICMP(arg, "match", p - arg) == 0) {
+  } else if (STRNICMP(arg, "keyword", (size_t)(p - arg)) == 0
+             || STRNICMP(arg, "region", (size_t)(p - arg)) == 0
+             || STRNICMP(arg, "match", (size_t)(p - arg)) == 0) {
     xp->xp_context = EXPAND_HIGHLIGHT;
   } else {
     xp->xp_context = EXPAND_NOTHING;

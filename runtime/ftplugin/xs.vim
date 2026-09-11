@@ -1,6 +1,6 @@
 " Vim filetype plugin file
 " Language:      XS (Perl extension interface language)
-" Maintainer:    vim-perl <vim-perl@googlegroups.com>
+" Maintainer:    vim-perl <vim-perl@googlegroups.com> (need to be subscribed to post)
 " Homepage:      https://github.com/vim-perl/vim-perl
 " Bugs/requests: https://github.com/vim-perl/vim-perl/issues
 " License:       Vim License (see :help license)
@@ -12,4 +12,4 @@ if exists("b:did_ftplugin")
 endif
 
 " Just use the C plugin for now.
-runtime! ftplugin/c.vim ftplugin/c_*.vim ftplugin/c/*.vim
+runtime! ftplugin/c[.]{vim,lua} ftplugin/c_*.{vim,lua} ftplugin/c/*.{vim,lua}

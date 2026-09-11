@@ -39,7 +39,7 @@
 // OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
 // SUCH DAMAGE.
 //
-// Changes done by by the neovim project follow the Apache v2 license available
+// Changes done by the neovim project follow the Apache v2 license available
 // at the repo root.
 
 #include <assert.h>
@@ -109,14 +109,7 @@ static void compose(MTPos *base, MTPos val)
   }
 }
 
-// Used by `marktree_splice`. Need to keep track of marks which moved
-// in order to repair intersections.
-typedef struct {
-  uint64_t id;
-  MTNode *old, *new;
-  int old_i, new_i;
-} Damage;
-typedef kvec_withinit_t(Damage, 8) DamageList;
+typedef Map(uint64_t, MTDamagePair) MTDamageMap;
 
 #include "marktree.c.generated.h"
 
@@ -339,36 +332,44 @@ static bool intersection_has(Intersection *x, uint64_t id)
   return false;
 }
 
+/// Finds the one position `id` can occupy in the ascending "intersect" array of `x`.
+///
+/// @return Index of `id`, or the index it would be inserted at if absent.
+static size_t intersect_item_pos(MTNode *x, uint64_t id)
+{
+  size_t lo = 0;
+  size_t hi = kv_size(x->intersect);
+  while (lo < hi) {
+    size_t mid = lo + (hi - lo) / 2;
+    if (kv_A(x->intersect, mid) < id) {
+      lo = mid + 1;
+    } else {
+      hi = mid;
+    }
+  }
+  return lo;
+}
+
 static void intersect_node(MarkTree *b, MTNode *x, uint64_t id)
 {
   assert(!(id & MARKTREE_END_FLAG));
-  kvi_pushp(x->intersect);
-  // optimized for the common case: new key is always in the end
-  for (ssize_t i = (ssize_t)kv_size(x->intersect) - 1; i >= 0; i--) {
-    if (i > 0 && kv_A(x->intersect, i - 1) > id) {
-      kv_A(x->intersect, i) = kv_A(x->intersect, i - 1);
-    } else {
-      kv_A(x->intersect, i) = id;
-      break;
-    }
+  // Common case: ids arrive in ascending order, so the new key belongs at the end.
+  if (kv_size(x->intersect) == 0 || kv_A(x->intersect, kv_size(x->intersect) - 1) < id) {
+    kvi_push(x->intersect, id);
+    return;
   }
+  size_t i = intersect_item_pos(x, id);
+  kvi_pushp(x->intersect);
+  memmove(&kv_A(x->intersect, i + 1), &kv_A(x->intersect, i),
+          (kv_size(x->intersect) - i - 1) * sizeof(kv_A(x->intersect, 0)));
+  kv_A(x->intersect, i) = id;
 }
 
 static void unintersect_node(MarkTree *b, MTNode *x, uint64_t id, bool strict)
 {
   assert(!(id & MARKTREE_END_FLAG));
-  bool seen = false;
-  size_t i;
-  for (i = 0; i < kv_size(x->intersect); i++) {
-    if (kv_A(x->intersect, i) < id) {
-      continue;
-    } else if (kv_A(x->intersect, i) == id) {
-      seen = true;
-      break;
-    } else {  // (kv_A(x->intersect, i) > id)
-      break;
-    }
-  }
+  size_t i = intersect_item_pos(x, id);
+  bool seen = i < kv_size(x->intersect) && kv_A(x->intersect, i) == id;
   if (strict) {
 #ifndef RELDEBUG
     // TODO(bfredl): This assert has been seen to fail for end users
@@ -1624,7 +1625,7 @@ bool marktree_itr_next_filter(MarkTree *b, MarkTreeIter *itr, int stop_row, int 
   return marktree_itr_check_filter(b, itr, stop_row, stop_col, meta_filter);
 }
 
-const uint32_t meta_map[kMTMetaCount] = {
+static const uint32_t meta_map[kMTMetaCount] = {
   MT_FLAG_DECOR_VIRT_TEXT_INLINE,
   MT_FLAG_DECOR_VIRT_LINES,
   MT_FLAG_DECOR_SIGNHL,
@@ -1858,18 +1859,27 @@ bool marktree_itr_step_overlap(MarkTree *b, MarkTreeIter *itr, MTPair *pair)
   return false;
 }
 
-static void swap_keys(MarkTree *b, MarkTreeIter *itr1, MarkTreeIter *itr2, DamageList *damage)
+static void check_damage(MarkTree *b, MTDamageMap *damage, MarkTreeIter *itr1, MarkTreeIter *itr2)
 {
-  if (itr1->x != itr2->x) {
+  const uint64_t start_id = mt_lookup_key_side(rawkey(itr1), false);
+  MTDamagePair *p = map_put_ref(uint64_t, MTDamagePair)(damage, start_id, NULL, NULL);
+  MTDamage *me = mt_end(rawkey(itr1)) ? &p->end : &p->start;
+  assert(me->new == NULL);
+  *me = (MTDamage){ .old = itr1->x, .new = itr2->x, .old_i = itr1->i, .new_i = itr2->i  };
+}
+
+static void swap_keys(MarkTree *b, MarkTreeIter *itr1, MarkTreeIter *itr2, MTDamageMap *damage)
+{
+  if (itr1->x->level || itr1->x != itr2->x) {
     if (mt_paired(rawkey(itr1))) {
-      kvi_push(*damage, ((Damage){ mt_lookup_key(rawkey(itr1)), itr1->x, itr2->x,
-                                   itr1->i, itr2->i }));
+      check_damage(b, damage, itr1, itr2);
     }
     if (mt_paired(rawkey(itr2))) {
-      kvi_push(*damage, ((Damage){ mt_lookup_key(rawkey(itr2)), itr2->x, itr1->x,
-                                   itr2->i, itr1->i }));
+      check_damage(b, damage, itr2, itr1);
     }
+  }
 
+  if (itr1->x != itr2->x) {
     uint32_t meta_inc_1[kMTMetaCount];
     meta_describe_key(meta_inc_1, rawkey(itr1));
     uint32_t meta_inc_2[kMTMetaCount];
@@ -1906,14 +1916,6 @@ static void swap_keys(MarkTree *b, MarkTreeIter *itr1, MarkTreeIter *itr2, Damag
   rawkey(itr2).pos = key2.pos;
   refkey(b, itr1->x, itr1->i);
   refkey(b, itr2->x, itr2->i);
-}
-
-static int damage_cmp(const void *s1, const void *s2)
-{
-  Damage *d1 = (Damage *)s1;
-  Damage *d2 = (Damage *)s2;
-  assert(d1->id != d2->id);
-  return d1->id > d2->id ? 1 : -1;
 }
 
 bool marktree_splice(MarkTree *b, int32_t start_line, int start_col, int old_extent_line,
@@ -1955,8 +1957,7 @@ bool marktree_splice(MarkTree *b, int32_t start_line, int start_col, int old_ext
 
   bool past_right = false;
   bool moved = false;
-  DamageList damage;
-  kvi_init(damage);
+  MTDamageMap damage = MAP_INIT;
 
   // Follow the general strategy of messing things up and fix them later
   // "oldbase" carries the information needed to calculate old position of
@@ -2071,61 +2072,44 @@ past_continue_same_node:
     marktree_itr_next_skip(b, itr, true, false, NULL, NULL);
   }
 
-  if (kv_size(damage)) {
-    // TODO(bfredl): a full sort is not really needed. we just need a "start" node to find
-    // its corresponding "end" node. Set up some dedicated hash for this later (c.f. the
-    // "grow only" variant of khash_t branch)
-    qsort((void *)&kv_A(damage, 0), kv_size(damage), sizeof(kv_A(damage, 0)),
-          damage_cmp);
-
-    for (size_t i = 0; i < kv_size(damage); i++) {
-      Damage d = kv_A(damage, i);
-      assert(i == 0 || d.id > kv_A(damage, i - 1).id);
-      if (!(d.id & MARKTREE_END_FLAG)) {  // start
-        if (i + 1 < kv_size(damage) && kv_A(damage, i + 1).id == (d.id | MARKTREE_END_FLAG)) {
-          Damage d2 = kv_A(damage, i + 1);
-
-          // pair
-          marktree_itr_set_node(b, itr, d.old, d.old_i);
-          marktree_itr_set_node(b, enditr, d2.old, d2.old_i);
-          marktree_intersect_pair(b, d.id, itr, enditr, true);
-          marktree_itr_set_node(b, itr, d.new, d.new_i);
-          marktree_itr_set_node(b, enditr, d2.new, d2.new_i);
-          marktree_intersect_pair(b, d.id, itr, enditr, false);
-
-          i++;  // consume two items
-          continue;
-        }
-
-        // d is lone start, end didn't move
-        MarkTreeIter endpos[1];
-        marktree_lookup(b, d.id | MARKTREE_END_FLAG, endpos);
-        if (endpos->x) {
-          marktree_itr_set_node(b, itr, d.old, d.old_i);
-          *enditr = *endpos;
-          marktree_intersect_pair(b, d.id, itr, enditr, true);
-          marktree_itr_set_node(b, itr, d.new, d.new_i);
-          *enditr = *endpos;
-          marktree_intersect_pair(b, d.id, itr, enditr, false);
-        }
-      } else {
-        // d is lone end, start didn't move
-        MarkTreeIter startpos[1];
-        uint64_t start_id = d.id & ~MARKTREE_END_FLAG;
-
-        marktree_lookup(b, start_id, startpos);
-        if (startpos->x) {
-          *itr = *startpos;
-          marktree_itr_set_node(b, enditr, d.old, d.old_i);
-          marktree_intersect_pair(b, start_id, itr, enditr, true);
-          *itr = *startpos;
-          marktree_itr_set_node(b, enditr, d.new, d.new_i);
-          marktree_intersect_pair(b, start_id, itr, enditr, false);
-        }
+  uint64_t start_id;
+  MTDamagePair d;
+  map_foreach(&damage, start_id, d, {
+    if (d.start.old && d.end.old) {
+      // both ends of pair did move
+      marktree_itr_set_node(b, itr, d.start.old, d.start.old_i);
+      marktree_itr_set_node(b, enditr, d.end.old, d.end.old_i);
+      marktree_intersect_pair(b, start_id, itr, enditr, true);
+      marktree_itr_set_node(b, itr, d.start.new, d.start.new_i);
+      marktree_itr_set_node(b, enditr, d.end.new, d.end.new_i);
+      marktree_intersect_pair(b, start_id, itr, enditr, false);
+    } else if (d.start.old) {
+      // only start did move
+      MarkTreeIter endpos[1];
+      marktree_lookup(b, start_id | MARKTREE_END_FLAG, endpos);
+      if (endpos->x) {
+        marktree_itr_set_node(b, itr, d.start.old, d.start.old_i);
+        *enditr = *endpos;
+        marktree_intersect_pair(b, start_id, itr, enditr, true);
+        marktree_itr_set_node(b, itr, d.start.new, d.start.new_i);
+        *enditr = *endpos;
+        marktree_intersect_pair(b, start_id, itr, enditr, false);
+      }
+    } else if (d.end.old) {
+      // only end did move
+      MarkTreeIter startpos[1];
+      marktree_lookup(b, start_id, startpos);
+      if (startpos->x) {
+        *itr = *startpos;
+        marktree_itr_set_node(b, enditr, d.end.old, d.end.old_i);
+        marktree_intersect_pair(b, start_id, itr, enditr, true);
+        *itr = *startpos;
+        marktree_itr_set_node(b, enditr, d.end.new, d.end.new_i);
+        marktree_intersect_pair(b, start_id, itr, enditr, false);
       }
     }
-  }
-  kvi_destroy(damage);
+  });
+  map_destroy(uint64_t, &damage);
 
   return moved;
 }

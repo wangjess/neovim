@@ -19,10 +19,10 @@
 #include "nvim/ex_docmd.h"
 #include "nvim/ex_getln.h"
 #include "nvim/garray.h"
-#include "nvim/getchar.h"
 #include "nvim/gettext_defs.h"
 #include "nvim/globals.h"
 #include "nvim/highlight_defs.h"
+#include "nvim/input.h"
 #include "nvim/keycodes.h"
 #include "nvim/mapping.h"
 #include "nvim/mbyte.h"
@@ -1851,10 +1851,7 @@ static void printdigraph(const digr_T *dp, result_T *previous)
 
   // Make msg_col a multiple of list_width by using spaces.
   if (msg_col % list_width != 0) {
-    int spaces = (msg_col / list_width + 1) * list_width - msg_col;
-    while (spaces--) {
-      msg_putchar(' ');
-    }
+    msg_advance((msg_col / list_width + 1) * list_width);
   }
 
   char *p = &buf[0];

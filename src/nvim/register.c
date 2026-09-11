@@ -10,19 +10,21 @@
 #include "nvim/clipboard.h"
 #include "nvim/cursor.h"
 #include "nvim/drawscreen.h"
-#include "nvim/edit.h"
 #include "nvim/errors.h"
 #include "nvim/eval.h"
 #include "nvim/eval/typval.h"
 #include "nvim/ex_cmds2.h"
+#include "nvim/ex_docmd.h"
 #include "nvim/ex_getln.h"
 #include "nvim/extmark.h"
 #include "nvim/file_search.h"
 #include "nvim/fold.h"
 #include "nvim/garray.h"
-#include "nvim/getchar.h"
 #include "nvim/globals.h"
 #include "nvim/indent.h"
+#include "nvim/input.h"
+#include "nvim/insert.h"
+#include "nvim/insexpand.h"
 #include "nvim/keycodes.h"
 #include "nvim/mark.h"
 #include "nvim/mbyte.h"
@@ -55,8 +57,8 @@ static yankreg_T y_regs[NUM_REGISTERS] = { 0 };
 
 static yankreg_T *y_previous = NULL;  // ptr to last written yankreg
 
-static const char e_search_pattern_and_expression_register_may_not_contain_two_or_more_lines[]
-  = N_("E883: Search pattern and expression register may not contain two or more lines");
+static const char e_register_char_cannot_contain_multiple_lines[]
+  = N_("E883: Register '%c' cannot contain multiple lines");
 
 /// @return the index of the register "" points to.
 int get_unname_register(void)
@@ -69,6 +71,9 @@ yankreg_T *get_y_register(int reg)
   return &y_regs[reg];
 }
 
+/// What `p` pastes: the last-written register (x: -, yy: 0, "+yy: +, :let @"=…: 0).
+///
+/// Exception: with clipboard=unnamed/unnamedplus, `p` tries the provider first.
 yankreg_T *get_y_previous(void)
   FUNC_ATTR_PURE
 {
@@ -147,8 +152,7 @@ char *get_expr_line_src(void)
 bool valid_yank_reg(int regname, bool writing)
 {
   if ((regname > 0 && ASCII_ISALNUM(regname))
-      || (!writing && vim_strchr("/.%:=", regname) != NULL)
-      || regname == '#'
+      || (!writing && vim_strchr("/#.%:=", regname) != NULL)
       || regname == '"'
       || regname == '-'
       || regname == '_'
@@ -163,7 +167,7 @@ bool valid_yank_reg(int regname, bool writing)
 /// clipboard register. This happens when `clipboard=unnamed[plus]` is set
 /// and a provider is available.
 ///
-/// @returns the name of of a clipboard register that should be used, or `NUL` if none.
+/// @returns the name of a clipboard register that should be used, or `NUL` if none.
 int get_default_register_name(void)
 {
   int name = NUL;
@@ -171,7 +175,7 @@ int get_default_register_name(void)
   return name;
 }
 
-/// Iterate over registers `regs`.
+/// Iterate over registers `regs` (only NUM_SAVED_REGISTERS, not clipboard "*"/"+").
 ///
 /// @param[in]   iter      Iterator. Pass NULL to start iteration.
 /// @param[in]   regs      Registers list to be iterated.
@@ -206,7 +210,7 @@ const void *op_reg_iter(const void *const iter, const yankreg_T *const regs, cha
   return NULL;
 }
 
-/// Iterate over global registers.
+/// Iterate over global registers (only NUM_SAVED_REGISTERS, not clipboard "*"/"+").
 ///
 /// @see op_register_iter
 const void *op_global_reg_iter(const void *const iter, char *const name, yankreg_T *const reg,
@@ -214,6 +218,31 @@ const void *op_global_reg_iter(const void *const iter, char *const name, yankreg
   FUNC_ATTR_NONNULL_ARG(2, 3, 4) FUNC_ATTR_WARN_UNUSED_RESULT
 {
   return op_reg_iter(iter, y_regs, name, reg, is_unnamed);
+}
+
+/// Gets the most-recent timestamp (nanoseconds) of all registers, or 0 if all are empty. Every
+/// register-write sets its timestamp, so this detects if any register changed (e.g. for caching).
+///
+/// @param clipboard  Include clipboard registers ("*"/"+").
+Timestamp reg_max_ts(bool clipboard)
+{
+  Timestamp max_ts = 0;
+  const void *iter = NULL;
+  do {
+    char name = NUL;
+    yankreg_T reg;
+    bool is_unnamed = false;
+    iter = op_global_reg_iter(iter, &name, &reg, &is_unnamed);
+    if (name == NUL) {
+      break;
+    }
+    max_ts = MAX(max_ts, reg.timestamp);
+  } while (iter != NULL);
+  if (clipboard) {
+    max_ts = MAX(max_ts, get_y_register(op_reg_index('*'))->timestamp);
+    max_ts = MAX(max_ts, get_y_register(op_reg_index('+'))->timestamp);
+  }
+  return max_ts;
 }
 
 /// Get a number of non-empty registers
@@ -424,7 +453,7 @@ static int stuff_yank(int regname, char *p)
     reg->y_size = 1;
     reg->y_type = kMTCharWise;
   }
-  reg->timestamp = os_time();
+  reg->timestamp = (Timestamp)os_realtime();
   return OK;
 }
 
@@ -538,19 +567,19 @@ static int put_in_typebuf(char *s, bool esc, bool colon, int silent)
 /// used only after other typeahead has been processed.
 static void put_reedit_in_typebuf(int silent)
 {
-  uint8_t buf[3];
-
   if (restart_edit == NUL) {
     return;
   }
 
-  if (restart_edit == 'V') {
-    buf[0] = 'g';
-    buf[1] = 'R';
-    buf[2] = NUL;
-  } else {
-    buf[0] = (uint8_t)(restart_edit == 'I' ? 'i' : restart_edit);
-    buf[1] = NUL;
+  uint8_t buf[] = { K_SPECIAL, KS_EXTRA, KE_COMMAND,
+                    // :startinsert
+                    's', 't', 'a', 'r', 't', 'i', CAR, NUL };
+  if (restart_edit == 'R') {
+    buf[8] = 'r';  // :startreplace
+  } else if (restart_edit == 'V') {
+    buf[8] = 'g';  // :startgreplace
+  } else if (restart_edit == 'A') {
+    buf[8] = '!';  // :startinsert!
   }
   if (ins_typebuf((char *)buf, REMAP_NONE, 0, true, silent) == OK) {
     restart_edit = NUL;
@@ -570,9 +599,9 @@ static void put_reedit_in_typebuf(int silent)
 ///          processed next is returned in idx.
 static char *execreg_line_continuation(String *lines, size_t *idx)
 {
-  size_t i = *idx;
-  assert(i > 0);
-  const size_t cmd_end = i;
+  size_t cmd_start = *idx;
+  assert(cmd_start > 0);
+  const size_t cmd_end = cmd_start;
 
   garray_T ga;
   ga_init(&ga, (int)sizeof(char), 400);
@@ -580,32 +609,34 @@ static char *execreg_line_continuation(String *lines, size_t *idx)
   // search backwards to find the first line of this command.
   // Any line not starting with \ or "\ is the start of the
   // command.
-  while (--i > 0) {
-    char *p = skipwhite(lines[i].data);
+  while (--cmd_start > 0) {
+    char *p = skipwhite(lines[cmd_start].data);
     if (*p != '\\' && (p[0] != '"' || p[1] != '\\' || p[2] != ' ')) {
       break;
     }
   }
-  const size_t cmd_start = i;
 
   // join all the lines
-  ga_concat(&ga, lines[cmd_start].data);
+  String *tmp = &lines[cmd_start];
+  ga_concat_len(&ga, tmp->data, tmp->size);
   for (size_t j = cmd_start + 1; j <= cmd_end; j++) {
-    char *p = skipwhite(lines[j].data);
+    tmp = &lines[j];
+    char *p = skipwhite(tmp->data);
     if (*p == '\\') {
       // Adjust the growsize to the current length to
       // speed up concatenating many lines.
       if (ga.ga_len > 400) {
         ga_set_growsize(&ga, MIN(ga.ga_len, 8000));
       }
-      ga_concat(&ga, p + 1);
+      p++;
+      ga_concat_len(&ga, p, (size_t)(tmp->data + tmp->size - p));
     }
   }
   ga_append(&ga, NUL);
   char *str = xmemdupz(ga.ga_data, (size_t)ga.ga_len);
   ga_clear(&ga);
 
-  *idx = i;
+  *idx = cmd_start;
   return str;
 }
 
@@ -654,7 +685,7 @@ int do_execreg(int regname, int colon, int addcr, int silent)
                                       Ctrl_V, false);
     // When in Visual mode "'<,'>" will be prepended to the command.
     // Remove it when it's already there.
-    if (VIsual_active && strncmp(p, "'<,'>", 5) == 0) {
+    if (Visual.active && strncmp(p, "'<,'>", 5) == 0) {
       retval = put_in_typebuf(p + 5, true, true, silent);
     } else {
       retval = put_in_typebuf(p, true, true, silent);
@@ -784,8 +815,8 @@ int insert_reg(int regname, yankreg_T *reg, bool literally_arg)
             curwin->w_cursor = curpos;
           }
 
-          AppendCharToRedobuff(Ctrl_R);
-          AppendCharToRedobuff(regname);
+          redo_append_char(Ctrl_R);
+          redo_append_char(regname);
           do_put(regname, NULL, dir, 1, PUT_CURSEND);
         } else {
           stuffescaped(reg->y_array[i].data, literally);
@@ -869,7 +900,7 @@ bool get_spec_reg(int regname, char **argp, bool *allocated, bool errmsg)
     }
     size_t cnt = find_ident_under_cursor(argp, (regname == Ctrl_W
                                                 ? (FIND_IDENT|FIND_STRING)
-                                                : FIND_STRING));
+                                                : FIND_STRING), NULL);
     *argp = cnt ? xmemdupz(*argp, cnt) : NULL;
     *allocated = true;
     return true;
@@ -941,7 +972,7 @@ void shift_delete_registers(bool y_append)
   y_regs[1].y_array = NULL;  // set register "1 to empty
 }
 
-#if defined(EXITFREE)
+#ifdef EXITFREE
 void clear_registers(void)
 {
   for (int i = 0; i < NUM_REGISTERS; i++) {
@@ -958,14 +989,13 @@ void free_register(yankreg_T *reg)
   FUNC_ATTR_NONNULL_ALL
 {
   XFREE_CLEAR(reg->additional_data);
-  if (reg->y_array == NULL) {
-    return;
+  if (reg->y_array != NULL) {
+    for (size_t i = reg->y_size; i-- > 0;) {  // from y_size - 1 to 0 included
+      API_CLEAR_STRING(reg->y_array[i]);
+    }
+    XFREE_CLEAR(reg->y_array);
   }
-
-  for (size_t i = reg->y_size; i-- > 0;) {  // from y_size - 1 to 0 included
-    API_CLEAR_STRING(reg->y_array[i]);
-  }
-  XFREE_CLEAR(reg->y_array);
+  *reg = (yankreg_T){ 0 };
 }
 
 /// Copy a block range into a register.
@@ -1034,7 +1064,7 @@ void op_yank_reg(oparg_T *oap, bool message, yankreg_T *reg, bool append)
   reg->y_width = 0;
   reg->y_array = xcalloc(yanklines, sizeof(String));
   reg->additional_data = NULL;
-  reg->timestamp = os_time();
+  reg->timestamp = (Timestamp)os_realtime();
 
   size_t y_idx = 0;  // index in y_array[]
   linenr_T lnum = oap->start.lnum;  // current line number
@@ -1092,7 +1122,7 @@ void op_yank_reg(oparg_T *oap, bool message, yankreg_T *reg, bool append)
     // Concatenate the last line of the old block with the first line of
     // the new block, unless being Vi compatible.
     if (curr->y_type == kMTCharWise
-        && vim_strchr(p_cpo, CPO_REGAPPEND) == NULL) {
+        && vim_strchr(p_cpo, kCpoRegappend) == NULL) {
       char *pnew = xmalloc(curr->y_array[curr->y_size - 1].size
                            + reg->y_array[0].size + 1);
       j--;
@@ -1166,27 +1196,37 @@ void op_yank_reg(oparg_T *oap, bool message, yankreg_T *reg, bool append)
 /// @param reg_width The width, only used if "reg_type" is kMTBlockWise.
 /// @param[out] buf Buffer to store formatted string. The allocated size should
 ///                 be at least NUMBUFLEN+2 to always fit the value.
-/// @param buf_len The allocated size of the buffer.
-void format_reg_type(MotionType reg_type, colnr_T reg_width, char *buf, size_t buf_len)
+/// @param bufsize The allocated size of the buffer.
+///
+/// @return The length of the register type string.
+size_t format_reg_type(MotionType reg_type, colnr_T reg_width, char *buf, size_t bufsize)
   FUNC_ATTR_NONNULL_ALL
 {
-  assert(buf_len > 1);
+  assert(bufsize > 1);
   switch (reg_type) {
   case kMTLineWise:
     buf[0] = 'V';
     buf[1] = NUL;
-    break;
+    return 1;
   case kMTCharWise:
     buf[0] = 'v';
     buf[1] = NUL;
-    break;
+    return 1;
   case kMTBlockWise:
-    snprintf(buf, buf_len, CTRL_V_STR "%" PRIdCOLNR, reg_width + 1);
-    break;
+    return vim_snprintf_safelen(buf, bufsize, CTRL_V_STR "%" PRIdCOLNR, reg_width + 1);
   case kMTUnknown:
     buf[0] = NUL;
-    break;
+    return 0;
   }
+  abort();
+}
+
+static void add_regtype_to_dict(yankreg_T *reg, dict_T *dict, char *buf, size_t bufsize)
+{
+  // "reg" is NULL when pasting a special register, which is charwise.
+  size_t len = format_reg_type(reg != NULL ? reg->y_type : kMTCharWise,
+                               reg != NULL ? reg->y_width : 0, buf, bufsize);
+  tv_dict_add_str_len(dict, S_LEN("regtype"), buf, (int)len);
 }
 
 /// Execute autocommands for TextYankPost.
@@ -1212,15 +1252,14 @@ void do_autocmd_textyankpost(oparg_T *oap, yankreg_T *reg)
   // The yanked text contents.
   list_T *const list = tv_list_alloc((ptrdiff_t)reg->y_size);
   for (size_t i = 0; i < reg->y_size; i++) {
-    tv_list_append_string(list, reg->y_array[i].data, -1);
+    tv_list_append_string(list, reg->y_array[i].data, (int)reg->y_array[i].size);
   }
   tv_list_set_lock(list, VAR_FIXED);
   tv_dict_add_list(dict, S_LEN("regcontents"), list);
 
   // Register type.
   char buf[NUMBUFLEN + 2];
-  format_reg_type(reg->y_type, reg->y_width, buf, ARRAY_SIZE(buf));
-  tv_dict_add_str(dict, S_LEN("regtype"), buf);
+  add_regtype_to_dict(reg, dict, buf, ARRAY_SIZE(buf));
 
   // Name of requested register, or empty string for unnamed operation.
   buf[0] = (char)oap->regname;
@@ -1247,6 +1286,82 @@ void do_autocmd_textyankpost(oparg_T *oap, yankreg_T *reg)
   restore_v_event(dict, &save_v_event);
 
   recursive = false;
+}
+
+/// Trigger TextPutPre or TextPutPost autocommand.
+///
+/// @param reg     May be NULL, if special register
+/// @param insert  Not NULL if special register, except '.'
+/// @param post    If Post or Pre
+/// @param dir     BACKWARD for 'P', FORWARD for 'p'
+static void put_do_autocmd(int regname, yankreg_T *reg, const String *insert, bool post,
+                           Direction dir)
+{
+  static bool recursive = false;
+
+  if (recursive || (regname == '_' && reg == NULL)) {
+    return;
+  }
+
+  if (regname != '.' && insert == NULL && reg == NULL) {
+    // Can happen when pasting text in normal mode in a terminal buffer
+    return;
+  }
+
+  save_v_event_T save_v_event;
+  dict_T *v_event = get_v_event(&save_v_event);
+
+  list_T *list = tv_list_alloc(reg != NULL ? (ptrdiff_t)reg->y_size : 1);
+
+  if (regname == '.') {
+    if (last_insert_ga.ga_data != NULL) {
+      // Get the last inserted text to place in "regcontents"
+      tv_list_append_string(list, last_insert_ga.ga_data, last_insert_ga.ga_len);
+    }
+  } else if (insert != NULL) {
+    tv_list_append_string(list, insert->data, (ssize_t)insert->size);
+  } else {
+    for (size_t n = 0; n < reg->y_size; n++) {
+      tv_list_append_string(list, reg->y_array[n].data, (ssize_t)reg->y_array[n].size);
+    }
+  }
+
+  tv_list_set_lock(list, VAR_FIXED);
+  tv_dict_add_list(v_event, S_LEN("regcontents"), list);
+
+  char buf[NUMBUFLEN + 2];
+
+  // register name or empty string for unnamed operation
+  buf[0] = (char)regname;
+  buf[1] = NUL;
+  size_t buflen = (buf[0] == NUL) ? 0 : 1;
+  tv_dict_add_str_len(v_event, S_LEN("regname"), buf, (int)buflen);
+
+  // kind of operation (P, p)
+  buf[0] = dir == BACKWARD ? 'P' : 'p';
+  buf[1] = NUL;
+  buflen = 1;
+  tv_dict_add_str_len(v_event, S_LEN("operator"), buf, (int)buflen);
+
+  add_regtype_to_dict(reg, v_event, buf, sizeof(buf));
+
+  tv_dict_add_bool(v_event, S_LEN("visual"), Visual.active);
+
+  // Lock the dictionary and its keys
+  tv_dict_set_keys_readonly(v_event);
+
+  recursive = true;
+  textlock++;
+  if (post) {
+    apply_autocmds(EVENT_TEXTPUTPOST, NULL, NULL, false, curbuf);
+  } else {
+    apply_autocmds(EVENT_TEXTPUTPRE, NULL, NULL, false, curbuf);
+  }
+  textlock--;
+  recursive = false;
+
+  // Empty the dictionary, v:event is still valid
+  restore_v_event(v_event, &save_v_event);
 }
 
 /// Yanks the text between "oap->start" and "oap->end" into a yank register.
@@ -1299,22 +1414,41 @@ void do_put(int regname, yankreg_T *reg, int dir, int count, int flags)
   const pos_T orig_end = curbuf->b_op_end;
   unsigned cur_ve_flags = get_ve_flags(curwin);
 
+  // Remove any preinserted text (issue vim/vim#19329)
+  if (ins_compl_preinsert_effect()) {
+    ins_compl_delete(false);
+  }
+
   curbuf->b_op_start = curwin->w_cursor;        // default for '[ mark
   curbuf->b_op_end = curwin->w_cursor;          // default for '] mark
 
   // Using inserted text works differently, because the register includes
   // special characters (newlines, etc.).
   if (regname == '.' && !reg) {
-    bool non_linewise_vis = (VIsual_active && VIsual_mode != 'V');
+    bool non_linewise_vis = (Visual.active && Visual.mode != 'V');
 
     // PUT_LINE has special handling below which means we use 'i' to start.
     char command_start_char = non_linewise_vis
                               ? 'c'
                               : (flags & PUT_LINE ? 'i' : (dir == FORWARD ? 'a' : 'i'));
 
+    bool has_textput_events = has_event(EVENT_TEXTPUTPRE) || has_event(EVENT_TEXTPUTPOST);
+    if (has_textput_events) {
+      add_last_insert++;
+    }
+
     // To avoid 'autoindent' on linewise puts, create a new line with `:put _`.
     if (flags & PUT_LINE) {
-      do_put('_', NULL, dir, 1, PUT_LINE);
+      const int save_add_last_insert = add_last_insert;
+      add_last_insert = 0;
+      stuffcharReadbuff(K_COMMAND);
+      if (dir == FORWARD) {
+        stuffReadbuffLen(S_LEN("put _"));
+      } else {
+        stuffReadbuffLen(S_LEN("put! _"));
+      }
+      stuffcharReadbuff(CAR);
+      add_last_insert = save_add_last_insert;
     }
 
     // If given a count when putting linewise, we stuff the readbuf with the
@@ -1329,12 +1463,25 @@ void do_put(int regname, yankreg_T *reg, int dir, int count, int flags)
           // back to the previous line in the case of 'noautoindent' and
           // 'backspace' includes "eol". So we insert a dummy space for Ctrl_U
           // to consume.
-          stuffReadbuff("\n ");
-          stuffcharReadbuff(Ctrl_U);
+          static const char s[] = { '\n', ' ', Ctrl_U, NUL };
+          stuffReadbuffLen(S_LEN(s));
         }
       }
     } else {
       stuff_inserted(command_start_char, count, false);
+    }
+
+    // Since the text is not inserted into the buffer immediately, just call
+    // TextPutPost after TextPutPre.
+    if (has_event(EVENT_TEXTPUTPRE)) {
+      put_do_autocmd('.', NULL, NULL, false, dir);
+    }
+    if (has_event(EVENT_TEXTPUTPOST)) {
+      put_do_autocmd('.', NULL, NULL, true, dir);
+    }
+
+    if (has_textput_events && --add_last_insert == 0) {
+      ga_clear(&last_insert_ga);
     }
 
     // Putting the text is done later, so can't move the cursor to the next
@@ -1381,6 +1528,9 @@ void do_put(int regname, yankreg_T *reg, int dir, int count, int flags)
         return;
       }
     }
+
+    // Execute the stuffed keys here: the put resolves within the current command.
+    exec_stuffed(NULL);
     return;
   }
 
@@ -1446,7 +1596,20 @@ void do_put(int regname, yankreg_T *reg, int dir, int count, int flags)
       y_size = 1;               // use fake one-line yank register
       y_array = &insert_string;
     }
+    if (has_event(EVENT_TEXTPUTPRE)) {
+      put_do_autocmd(regname, NULL, &insert_string, false, dir);
+    }
   } else {
+    if (has_event(EVENT_TEXTPUTPRE)) {
+      yankreg_T *const save_reg = reg;
+      if (reg == NULL) {
+        // Make sure to call this before we set the variables, as setreg()
+        // may be called and invalidate them.
+        reg = get_yank_register(regname, YREG_PASTE);
+      }
+      put_do_autocmd(regname, reg, NULL, false, dir);
+      reg = save_reg;
+    }
     // in case of replacing visually selected text
     // the yankreg might already have been saved to avoid
     // just restoring the deleted text.
@@ -1462,7 +1625,7 @@ void do_put(int regname, yankreg_T *reg, int dir, int count, int flags)
 
   if (curbuf->terminal) {
     terminal_paste(count, y_array, y_size);
-    return;
+    goto end;
   }
 
   colnr_T split_pos = 0;
@@ -1577,16 +1740,16 @@ void do_put(int regname, yankreg_T *reg, int dir, int count, int flags)
 
     if (dir == FORWARD && c != NUL) {
       if (cur_ve_flags == kOptVeFlagAll) {
-        getvcol(curwin, &curwin->w_cursor, &col, NULL, &endcol2);
+        getvcol(curwin, &curwin->w_cursor, &col, NULL, &endcol2, 0);
       } else {
-        getvcol(curwin, &curwin->w_cursor, NULL, NULL, &col);
+        getvcol(curwin, &curwin->w_cursor, NULL, NULL, &col, 0);
       }
 
       // move to start of next multi-byte character
       curwin->w_cursor.col += utfc_ptr2len(get_cursor_pos_ptr());
       col++;
     } else {
-      getvcol(curwin, &curwin->w_cursor, &col, NULL, &endcol2);
+      getvcol(curwin, &curwin->w_cursor, &col, NULL, &endcol2, 0);
     }
 
     col += curwin->w_cursor.coladd;
@@ -1783,7 +1946,7 @@ void do_put(int regname, yankreg_T *reg, int dir, int count, int flags)
       linenr_T start_lnum = lnum;
       int first_byte_off = 0;
 
-      if (VIsual_active) {
+      if (Visual.active) {
         end_lnum = MAX(curbuf->b_visual.vi_end.lnum, curbuf->b_visual.vi_start.lnum);
         if (end_lnum > start_lnum) {
           // "col" is valid for the first line, in following lines
@@ -1794,12 +1957,12 @@ void do_put(int regname, yankreg_T *reg, int dir, int count, int flags)
             .col = col,
             .coladd = 0,
           };
-          getvcol(curwin, &pos, NULL, &vcol, NULL);
+          getvcol(curwin, &pos, NULL, &vcol, NULL, 0);
         }
       }
 
       if (count == 0 || yanklen == 0) {
-        if (VIsual_active) {
+        if (Visual.active) {
           lnum = end_lnum;
         }
       } else if (count > INT_MAX / yanklen) {
@@ -1820,7 +1983,7 @@ void do_put(int regname, yankreg_T *reg, int dir, int count, int flags)
               col = MAXCOL;
             }
           }
-          if (VIsual_active && col > oldlen) {
+          if (Visual.active && col > oldlen) {
             lnum++;
             continue;
           }
@@ -1841,18 +2004,18 @@ void do_put(int regname, yankreg_T *reg, int dir, int count, int flags)
           if (lnum == curwin->w_cursor.lnum) {
             // make sure curwin->w_virtcol is updated
             changed_cline_bef_curs(curwin);
-            invalidate_botline(curwin);
+            invalidate_botline_win(curwin);
             curwin->w_cursor.col += (colnr_T)(totlen - 1);
           }
           changed_bytes(lnum, col);
           extmark_splice_cols(curbuf, (int)lnum - 1, col,
                               0, (int)totlen, kExtmarkUndo);
-          if (VIsual_active) {
+          if (Visual.active) {
             lnum++;
           }
-        } while (VIsual_active && lnum <= end_lnum);
+        } while (Visual.active && lnum <= end_lnum);
 
-        if (VIsual_active) {  // reset lnum to the last visual line
+        if (Visual.active) {  // reset lnum to the last visual line
           lnum--;
         }
       }
@@ -2061,6 +2224,15 @@ end:
     curbuf->b_op_start = orig_start;
     curbuf->b_op_end = orig_end;
   }
+
+  if (has_event(EVENT_TEXTPUTPOST)) {
+    if (insert_string.data == NULL) {
+      put_do_autocmd(regname, reg, NULL, true, dir);
+    } else {
+      put_do_autocmd(regname, NULL, &insert_string, true, dir);
+    }
+  }
+
   if (allocated) {
     xfree(insert_string.data);
   }
@@ -2068,7 +2240,9 @@ end:
     xfree(y_array);
   }
 
-  VIsual_active = false;
+  if (!curbuf->terminal) {  // XXX
+    Visual.active = false;
+  }
 
   // If the cursor is past the end of the line put it at the end.
   adjust_cursor_eol();
@@ -2208,7 +2382,7 @@ void ex_display(exarg_T *eap)
   }
 
   // display alternate file name
-  if ((arg == NULL || vim_strchr(arg, '%') != NULL) && !got_int) {
+  if ((arg == NULL || vim_strchr(arg, '#') != NULL) && !got_int) {
     char *fname;
     linenr_T dummy;
 
@@ -2336,7 +2510,7 @@ void *get_reg_contents(int regname, int flags)
   if (flags & kGRegList) {
     list_T *const list = tv_list_alloc((ptrdiff_t)reg->y_size);
     for (size_t i = 0; i < reg->y_size; i++) {
-      tv_list_append_string(list, reg->y_array[i].data, -1);
+      tv_list_append_string(list, reg->y_array[i].data, (int)reg->y_array[i].size);
     }
 
     return list;
@@ -2506,7 +2680,7 @@ static void str_to_reg(yankreg_T *y_ptr, MotionType yank_type, const char *str, 
   y_ptr->y_type = yank_type;
   y_ptr->y_size = lnum;
   XFREE_CLEAR(y_ptr->additional_data);
-  y_ptr->timestamp = os_time();
+  y_ptr->timestamp = (Timestamp)os_realtime();
   if (yank_type == kMTBlockWise) {
     y_ptr->y_width = (blocklen == -1 ? (colnr_T)maxlen - 1 : blocklen);
   } else {
@@ -2536,12 +2710,12 @@ void write_reg_contents(int name, const char *str, ssize_t len, int must_append)
 void write_reg_contents_lst(int name, char **strings, bool must_append, MotionType yank_type,
                             colnr_T block_len)
 {
-  if (name == '/' || name == '=') {
+  if (name == '/' || name == '=' || name == '#') {
     char *s = strings[0];
     if (strings[0] == NULL) {
       s = "";
     } else if (strings[1] != NULL) {
-      emsg(_(e_search_pattern_and_expression_register_may_not_contain_two_or_more_lines));
+      semsg(_(e_register_char_cannot_contain_multiple_lines), name);
       return;
     }
     write_reg_contents_ex(name, s, -1, must_append, yank_type, block_len);
@@ -2595,6 +2769,11 @@ void write_reg_contents_ex(int name, const char *str, ssize_t len, bool must_app
   }
 
   if (name == '#') {
+    if (len == 0) {
+      curwin->w_alt_fnum = 0;  // clear altfile
+      return;
+    }
+
     buf_T *buf;
 
     if (ascii_isdigit(*str)) {

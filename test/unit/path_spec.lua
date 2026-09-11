@@ -1,6 +1,8 @@
 local uv = vim.uv
 local t = require('test.unit.testutil')
-local itp = t.gen_itp(it)
+local describe, before_each, after_each, setup, teardown =
+  t.describe, t.before_each, t.after_each, t.setup, t.teardown
+local itp = t.gen_itp(t.it)
 
 local cimport = t.cimport
 local eq = t.eq
@@ -107,11 +109,11 @@ describe('path.c', function()
     end)
   end)
 
-  describe('path_full_compare', function()
-    local function path_full_compare(s1, s2, cn, ee)
+  describe('path_equal', function()
+    local function path_equal(s1, s2, flags)
       s1 = to_cstr(s1)
       s2 = to_cstr(s2)
-      return cimp.path_full_compare(s1, s2, cn or 0, ee or 1)
+      return cimp.path_equal(s1, s2, flags or cimp.kPathCmpExpand)
     end
 
     local f1 = 'f1.o'
@@ -127,26 +129,72 @@ describe('path.c', function()
       os.remove(f2)
     end)
 
-    itp('returns kEqualFiles when passed the same file', function()
-      eq(cimp.kEqualFiles, (path_full_compare(f1, f1)))
+    itp('returns true when passed the same existing file', function()
+      eq(true, path_equal(f1, f1))
+      eq(true, path_equal(f1, ('%s/%s'):format(uv.fs_realpath('.'), f1)))
     end)
 
-    itp('returns kEqualFileNames when files that dont exist and have same name', function()
-      eq(cimp.kEqualFileNames, (path_full_compare('null.txt', 'null.txt', true)))
+    itp(
+      'returns true for nonexistent same-name files via fullname fallback (kPathCmpFull)',
+      function()
+        eq(true, path_equal('null.txt', 'null.txt', cimp.kPathCmpFull))
+      end
+    )
+
+    itp('returns false for nonexistent same-name files without fullname fallback', function()
+      eq(false, path_equal('null.txt', 'null.txt'))
     end)
 
-    itp('returns kBothFilesMissing when files that dont exist', function()
-      eq(cimp.kBothFilesMissing, (path_full_compare('null.txt', 'null.txt')))
+    itp('returns false when passed different files', function()
+      eq(false, path_equal(f1, f2))
+      eq(false, path_equal(f2, f1))
     end)
 
-    itp('returns kDifferentFiles when passed different files', function()
-      eq(cimp.kDifferentFiles, (path_full_compare(f1, f2)))
-      eq(cimp.kDifferentFiles, (path_full_compare(f2, f1)))
+    itp('returns false if only one does not exist', function()
+      eq(false, path_equal(f1, 'null.txt'))
+      eq(false, path_equal('null.txt', f1))
     end)
 
-    itp('returns kOneFileMissing if only one does not exist', function()
-      eq(cimp.kOneFileMissing, (path_full_compare(f1, 'null.txt')))
-      eq(cimp.kOneFileMissing, (path_full_compare('null.txt', f1)))
+    itp('returns false if two files differ literally', function()
+      eq(false, path_equal('null1.txt', 'null2.txt', cimp.kPathCmpLiteral))
+    end)
+
+    itp("respects 'fileignorecase' option", function()
+      options.p_fic = false
+      eq(false, path_equal('Foo', 'foo', cimp.kPathCmpLiteral))
+      options.p_fic = true
+      eq(true, path_equal('Foo', 'foo', cimp.kPathCmpLiteral))
+      -- mb_toupper considers ß and ẞ equal, but not İ and i.
+      -- utf_fold keeps them as they are.
+      eq(false, path_equal('foß', 'foẞ', cimp.kPathCmpLiteral))
+      eq(false, path_equal('foİ', 'foi', cimp.kPathCmpLiteral))
+    end)
+  end)
+
+  describe('path_cmp', function()
+    local function path_cmp(a, b, maxlen)
+      return cimp.path_cmp(options.p_fic, to_cstr(a), to_cstr(b), maxlen)
+    end
+
+    itp('returns 0 when passed same paths', function()
+      eq(0, path_cmp('foo/bar', 'foo/bar', 7))
+    end)
+
+    itp('returns non-zero when passed different paths', function()
+      eq(1, path_cmp('foobar', 'foo/bar', 7))
+      eq(-1, path_cmp('foo/bar', 'foobar', 7))
+      neq(0, path_cmp('foo/bar', 'foo/baz', 7))
+    end)
+
+    itp('returns 0 when maxlen truncates to a common prefix', function()
+      eq(0, path_cmp('foo/bar', 'foo/baz', 6))
+    end)
+
+    itp('ignores a single trailing path sep', function()
+      eq(0, path_cmp('foo', 'foo/', 4))
+      neq(0, path_cmp('/', '//', 2))
+      neq(0, path_cmp('foo', 'foo//', 5))
+      neq(0, path_cmp('foo/', 'foo//', 5))
     end)
   end)
 
@@ -299,6 +347,11 @@ describe('path.c', function()
       local full = to_cstr('some/very/long/directory/file.txt')
       local dir = to_cstr('some/very/long')
       eq('directory/file.txt', (ffi.string(cimp.path_shorten_fname(full, dir))))
+      -- Also works with duplicate slashes. #37080
+      full = to_cstr('some/very/long//directory/file.txt')
+      eq('directory/file.txt', (ffi.string(cimp.path_shorten_fname(full, dir))))
+      full = to_cstr('some/very/long///directory/file.txt')
+      eq('directory/file.txt', (ffi.string(cimp.path_shorten_fname(full, dir))))
     end)
   end)
 end)
@@ -392,14 +445,6 @@ describe('path.c', function()
   setup(function()
     mkdir('unit-test-directory')
     io.open('unit-test-directory/test.file', 'w'):close()
-
-    -- Since the tests are executed, they are called by an executable. We use
-    -- that executable for several asserts.
-    local absolute_executable = arg[0]
-
-    -- Split absolute_executable into a directory and the actual file name for
-    -- later usage.
-    local directory, executable_name = string.match(absolute_executable, '^(.*)/(.*)$') -- luacheck: ignore
   end)
 
   teardown(function()
@@ -693,20 +738,51 @@ describe('path.c', function()
   end)
 
   describe('path_with_url', function()
-    itp('scheme is alpha and inner hyphen only', function()
+    itp('scheme is alpha and inner numeric, "+", "-", "." only', function()
       local function path_with_url(fname)
         return cimp.path_with_url(to_cstr(fname))
       end
+
+      -- Check normal scheme with just alphabetic
       eq(1, path_with_url([[test://xyz/foo/b0]]))
       eq(2, path_with_url([[test:\\xyz\foo\b0]]))
-      eq(0, path_with_url([[test+abc://xyz/foo/b1]]))
+
+      -- Check valid scheme with just alphanumeric
+      eq(1, path_with_url([[test123://xyz/foo/b0]]))
+      eq(2, path_with_url([[test123:\\xyz\foo\b0]]))
+
+      -- Check invalid scheme (contains invalid character)
       eq(0, path_with_url([[test_abc://xyz/foo/b2]]))
+
+      -- Check valid scheme containing '+', '-', or '.'
+      eq(1, path_with_url([[test+abc://xyz/foo/b1]]))
+      eq(2, path_with_url([[test+abc:\\xyz\foo\b1]]))
       eq(1, path_with_url([[test-abc://xyz/foo/b3]]))
       eq(2, path_with_url([[test-abc:\\xyz\foo\b3]]))
+      eq(1, path_with_url([[test.abc://xyz/foo/b1]]))
+      eq(2, path_with_url([[test.abc:\\xyz\foo\b1]]))
+
+      -- Check valid scheme with full suite of allowed characters
+      eq(1, path_with_url([[test+abc-123.ghi://xyz/foo/b1]]))
+      eq(2, path_with_url([[test+abc-123.ghi:\\xyz\foo\b1]]))
+
+      -- Check invalid scheme starting or ending with '+', '-', or '.'
       eq(0, path_with_url([[-test://xyz/foo/b4]]))
       eq(0, path_with_url([[test-://xyz/foo/b5]]))
+      eq(0, path_with_url([[+test://xyz/foo/b4]]))
+      eq(0, path_with_url([[test+://xyz/foo/b5]]))
+      eq(0, path_with_url([[.test://xyz/foo/b4]]))
+      eq(0, path_with_url([[test.://xyz/foo/b5]]))
+
+      -- Check additional valid scheme containing '+', '-', or '.'
       eq(1, path_with_url([[test-C:/xyz/foo/b5]]))
       eq(1, path_with_url([[test-custom:/xyz/foo/b5]]))
+      eq(1, path_with_url([[test+C:/xyz/foo/b5]]))
+      eq(1, path_with_url([[test+custom:/xyz/foo/b5]]))
+      eq(1, path_with_url([[test.C:/xyz/foo/b5]]))
+      eq(1, path_with_url([[test.custom:/xyz/foo/b5]]))
+
+      -- Check invalid scheme representing drive letter
       eq(0, path_with_url([[c:/xyz/foo/b5]]))
       eq(0, path_with_url([[C:/xyz/foo/b5]]))
     end)

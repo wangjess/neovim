@@ -10,6 +10,9 @@ on:
       - 'release-[0-9]+.[0-9]+'
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -20,26 +23,68 @@ env:
   BUILD_DIR: ${{ github.workspace }}/build
   INSTALL_PREFIX: ${{ github.workspace }}/nvim-install
   LOG_DIR: ${{ github.workspace }}/build/log
-  NVIM_LOG_FILE: ${{ github.workspace }}/build/.nvimlog
+  NVIM_LOG_FILE: ${{ github.workspace }}/build/nvim.log
   TSAN_OPTIONS: log_path=${{ github.workspace }}/build/log/tsan
   VALGRIND_LOG: ${{ github.workspace }}/build/log/valgrind-%p.log
   # TEST_FILE: test/functional/core/startup_spec.lua
   # TEST_FILTER: foo
 
 jobs:
+  lintc:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      NVIM_LOG_FILE: ${{ github.workspace }}/zig-out/nvim.log
+      OPTS: -Doptimize=ReleaseFast -Dci-build
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup
+
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.16.0
+      - run: sudo apt-get install -y inotify-tools
+
+      - name: nvim_bin
+        id: nvim_bin
+        run: zig build nvim_bin $OPTS
+
+      - if: success() || failure() && steps.nvim_bin.outcome == 'success'
+        name: clint.lua
+        run: zig build lintc-clint $OPTS
+
+      - if: success() || failure() && steps.nvim_bin.outcome == 'success'
+        name: clang-tidy
+        run: zig build lintc-clang-tidy $OPTS
+
+      - if: success() || failure() && steps.nvim_bin.outcome == 'success'
+        name: uncrustify
+        run: zig build lintc-uncrustify $OPTS
+
   lint:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 10
     env:
       CC: clang
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
       - uses: ./.github/actions/setup
 
       - name: Install stylua
         run: |
           wget --directory-prefix="$BIN_DIR" https://github.com/JohnnyMorganz/StyLua/releases/latest/download/stylua-linux-aarch64.zip
           (cd "$BIN_DIR"; unzip stylua*.zip)
+
+      - name: Install ts_query_ls
+        run: |
+          wget --directory-prefix="$BIN_DIR" https://github.com/ribru17/ts_query_ls/releases/latest/download/ts_query_ls-aarch64-unknown-linux-gnu.tar.gz
+          (cd "$BIN_DIR"; tar -xzvf ts_query_ls-aarch64-unknown-linux-gnu.tar.gz)
 
       - name: Build third-party deps
         run: |
@@ -51,35 +96,25 @@ jobs:
       - if: "!cancelled()"
         name: Determine if run should be aborted
         id: abort_job
-        run: echo "status=${{ job.status }}" >> $GITHUB_OUTPUT
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: echo "status=${JOB_STATUS}" >> $GITHUB_OUTPUT
 
       - if: success() || failure() && steps.abort_job.outputs.status == 'success'
         name: stylua
         run: cmake --build build --target lintlua-stylua
 
       - if: success() || failure() && steps.abort_job.outputs.status == 'success'
-        name: luals
-        run: cmake --build build --target luals
-
-      - if: success() || failure() && steps.abort_job.outputs.status == 'success'
-        name: luacheck
-        run: cmake --build build --target lintlua-luacheck
+        name: emmylua
+        run: cmake --build build --target emmylua-check
 
       - if: success() || failure() && steps.abort_job.outputs.status == 'success'
         name: lintsh
         run: cmake --build build --target lintsh
 
       - if: success() || failure() && steps.abort_job.outputs.status == 'success'
-        name: clint.py
-        run: cmake --build build --target lintc-clint
-
-      - if: success() || failure() && steps.abort_job.outputs.status == 'success'
-        name: clang-tidy
-        run: cmake --build build --target lintc-clang-tidy
-
-      - if: success() || failure() && steps.abort_job.outputs.status == 'success'
-        name: uncrustify
-        run: cmake --build build --target lintc-uncrustify
+        name: lintquery
+        run: cmake --build build --target lintquery
 
   clang-analyzer:
     runs-on: ubuntu-24.04-arm
@@ -87,7 +122,10 @@ jobs:
     env:
       CC: clang
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
       - uses: ./.github/actions/setup
       - name: Build third-party deps
         run: |
@@ -113,7 +151,7 @@ jobs:
             { runner: ubuntu-24.04, os: ubuntu, flavor: release, cc: gcc, flags: -D CMAKE_BUILD_TYPE=Release -D ENABLE_TRANSLATIONS=ON },
             { runner: ubuntu-24.04-arm, os: ubuntu, flavor: arm, cc: clang, flags: -D CMAKE_BUILD_TYPE=RelWithDebInfo },
             { runner: macos-15-intel, os: macos, flavor: intel, cc: clang, flags: -D CMAKE_FIND_FRAMEWORK=NEVER, deps_flags: -D CMAKE_FIND_FRAMEWORK=NEVER },
-            { runner: macos-15, os: macos, flavor: arm, cc: clang, flags: -D CMAKE_FIND_FRAMEWORK=NEVER, deps_flags: -D CMAKE_FIND_FRAMEWORK=NEVER },
+            { runner: macos-26, os: macos, flavor: arm, cc: clang, flags: -D CMAKE_FIND_FRAMEWORK=NEVER, deps_flags: -D CMAKE_FIND_FRAMEWORK=NEVER },
             { runner: ubuntu-24.04, os: ubuntu, flavor: puc-lua, cc: gcc, deps_flags: -D USE_BUNDLED_LUAJIT=OFF -D USE_BUNDLED_LUA=ON, flags: -D PREFER_LUA=ON },
           ]
         test: [unittest, functionaltest, oldtest]
@@ -132,7 +170,10 @@ jobs:
       CC: ${{ matrix.build.cc }}
       NVIM_TEST_INTEG: ${{ matrix.build.flavor == 'release' && '1' || '0' }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
       - uses: ./.github/actions/setup
         with:
           install_flags: "--test"
@@ -149,34 +190,55 @@ jobs:
           sudo cpanm -n Neovim::Ext || cat "$HOME/.cpanm/build.log"
           perl -W -e 'use Neovim::Ext; print $Neovim::Ext::VERSION'
 
+      - name: List runtime files
+        run: git -C runtime ls-files -z '*.vim' '*.ps' '*.dict' '*.py' '*.tutor' '*.awk' '*.sh' '*.bat' > "$RUNNER_TEMP/runtime-files"
+
       - name: Remove .git directory
         if: ${{ matrix.build.os == 'ubuntu' }}
         run: cmake -E rm -rf -- .git
 
       - name: Build third-party deps
+        env:
+          BUILD_DEPS_FLAGS: ${{ matrix.build.deps_flags }}
         run: |
-          cmake -S cmake.deps --preset ci -D CMAKE_BUILD_TYPE=Debug ${{ matrix.build.deps_flags }}
+          cmake -S cmake.deps --preset ci -D CMAKE_BUILD_TYPE=Debug $BUILD_DEPS_FLAGS
           cmake --build .deps
 
       - name: Build
+        env:
+          BUILD_FLAGS: ${{ matrix.build.flags }}
         run: |
-          cmake --preset ci -D CMAKE_BUILD_TYPE=Debug -D CMAKE_INSTALL_PREFIX:PATH=$INSTALL_PREFIX ${{ matrix.build.flags }}
+          cmake --preset ci -D CMAKE_BUILD_TYPE=Debug -D CMAKE_INSTALL_PREFIX:PATH=$INSTALL_PREFIX $BUILD_FLAGS
           cmake --build build
 
+      - if: ${{ matrix.test == 'unittest' }}
+        name: unittest
+        timeout-minutes: 20
+        run: cmake --build build --target unittest
+
+      - if: ${{ matrix.test == 'functionaltest' }}
+        name: functionaltest
+        timeout-minutes: 20
+        env:
+          # With parallel tests, use shorter timeout for a single group.
+          TEST_TIMEOUT: 600
+        run: |
+          set +e
+          # `-k 0` tells ninja to continue running all targets even if some fail.
+          cmake --build build --target functionaltest-parallel -j 2 -- -k 0
+          exit_code="$?"
+          cmake --build build --target functionaltest-summary
+          exit "$exit_code"
+
       - if: ${{ matrix.test == 'oldtest' }}
-        name: ${{ matrix.test }}
+        name: oldtest
         timeout-minutes: 20
         run: make -C test/old/testdir NVIM_PRG=$(realpath build)/bin/nvim
-
-      - if: ${{ matrix.test != 'oldtest' }}
-        name: ${{ matrix.test }}
-        timeout-minutes: 20
-        run: cmake --build build --target ${{ matrix.test }}
 
       - name: Install
         run: |
           cmake --install build
-          "$INSTALL_PREFIX/bin/nvim" --version
+          "$INSTALL_PREFIX/bin/nvim" -V1 --version
           if ! "$INSTALL_PREFIX/bin/nvim" -u NONE -e -c ':help' -c ':qall'; then
             echo "Running ':help' in the installed nvim failed."
             echo "Maybe the helptags have not been generated properly."
@@ -185,12 +247,12 @@ jobs:
           fi
 
           # Check that all runtime files were installed
-          for file in $(git -C runtime ls-files '*.vim' '*.ps' '*.dict' '*.py' '*.tutor' '*.awk' '*.sh' '*.bat'); do
+          while IFS= read -r -d '' file; do
             if ! test -e "$INSTALL_PREFIX/share/nvim/runtime/$file"; then
               printf "It appears that %s is not installed." "$file"
               exit 1
             fi
-          done
+          done < "$RUNNER_TEMP/runtime-files"
 
           # Check that generated syntax file has function names, #5060.
           genvimsynf=syntax/vim/generated.vim
@@ -209,24 +271,27 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     name: build using zig build (linux)
+    env:
+      # NB: tests assume there is a chosen install path, but nothing needs to be actually installed
+      OPTS: -Doptimize=ReleaseSafe -Dinstall-path=/usr/
     steps:
-      - uses: actions/checkout@v5
-      - uses: mlugg/setup-zig@v2
+      - uses: actions/checkout@v7.0.1
         with:
-          version: 0.15.1
+          persist-credentials: false
+
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.16.0
       - run: sudo apt-get install -y inotify-tools
 
-      # This is a workaround for "zig fetch" being unable to decompress lua-dev-deps.tar.gz
-      # As the hash in build.zig.zon is calculated after decompression, we can preload the cache instead.
-      # This is hopefully fixed for zig 0.15.2, see https://github.com/ziglang/zig/issues/24916
-      - run: curl -L https://github.com/neovim/deps/raw/06ef2b58b0876f8de1a3f5a710473dcd7afff251/opt/lua-dev-deps.tar.gz | zcat > lua-dev-deps.tar
-      - run: zig fetch lua-dev-deps.tar
-
-      - run: zig build test_nlua0
-      - run: zig build nvim && ./zig-out/bin/nvim --version
-      - run: zig build unittest
-      - run: zig build functionaltest
-      # `zig build nvim` uses a lua script for doctags in order to support cross-compiling
+      - run: zig fmt --check . # run first, otherwise it will descend into zig-pkg..
+      - run: mkdir -p build/ # build/ is used for shared log paths, see global ENV defs
+      - run: zig build $OPTS test_nlua0
+      - run: zig build $OPTS nvim_bin && ./zig-out/bin/nvim --version
+      - run: zig build $OPTS unittest
+      - run: zig build $OPTS functionaltest
+      - run: zig build $OPTS oldtest
+      # `zig build` uses a lua script for doctags in order to support cross-compiling
       # compare with the builtin generator that they match
       - run: cd runtime; ../zig-out/bin/nvim -u NONE -i NONE -e --headless -c "helptags ++t doc" -c quit
       - run: diff -u runtime/doc/tags zig-out/runtime/doc/tags
@@ -235,32 +300,37 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 45
     name: build using zig build (macos 15)
+    env:
+      OPTS: -Dinstall-path=/usr/
     steps:
-      - uses: actions/checkout@v5
-      - uses: mlugg/setup-zig@v2
+      - uses: actions/checkout@v7.0.1
         with:
-          version: 0.15.1
+          persist-credentials: false
 
-      - run: curl -L https://github.com/neovim/deps/raw/06ef2b58b0876f8de1a3f5a710473dcd7afff251/opt/lua-dev-deps.tar.gz | zcat > lua-dev-deps.tar
-      - run: zig fetch lua-dev-deps.tar
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.16.0
 
-      - run: zig build test_nlua0 -Dluajit=false
-      - run: zig build nvim_bin -Dluajit=false && ./zig-out/bin/nvim --version
-      - run: zig build functionaltest -Dluajit=false
+      - run: mkdir -p build/ # build/ is used for shared log paths, see global ENV defs
+      - run: zig build $OPTS test_nlua0
+      - run: zig build $OPTS nvim_bin && ./zig-out/bin/nvim --version
+      - run: zig build $OPTS functionaltest
+      - run: zig build $OPTS oldtest
 
   zig-build-windows:
-    runs-on: windows-2022
+    runs-on: windows-2025
     timeout-minutes: 45
     name: build using zig build (windows)
     steps:
-      - uses: actions/checkout@v5
-      - uses: mlugg/setup-zig@v2
+      - uses: actions/checkout@v7.0.1
         with:
-          version: 0.15.1
+          persist-credentials: false
 
-      - run: curl -L https://github.com/neovim/deps/raw/06ef2b58b0876f8de1a3f5a710473dcd7afff251/opt/lua-dev-deps.tar.gz -O
-      - run: 7z x lua-dev-deps.tar.gz
-      - run: zig fetch lua-dev-deps.tar
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.16.0
+
+      - run: mkdir -p build/ # build/ is used for shared log paths, see global ENV defs
       - run: zig build test_nlua0
       - run: zig build nvim_bin
       - run: ./zig-out/bin/nvim --version
@@ -276,12 +346,14 @@ jobs:
     env:
       CC: gcc
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
       - uses: ./.github/actions/setup
 
       - name: Install dependencies
         run: |
-          sudo add-apt-repository ppa:neovim-ppa/stable
           sudo apt-get install -y \
             libluajit-5.1-dev \
             libunibilium-dev \

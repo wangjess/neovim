@@ -4,6 +4,8 @@
 local t = require('test.testutil')
 local n = require('test.functional.testnvim')()
 
+local describe, it, before_each, setup, teardown =
+  t.describe, t.it, t.before_each, t.setup, t.teardown
 local source = n.source
 local clear, command, expect, eq, eval = n.clear, n.command, n.expect, t.eq, n.eval
 local write_file, dedent = t.write_file, t.dedent
@@ -77,7 +79,7 @@ describe('autocommands that delete and unload buffers:', function()
     command('set nohidden')
     command('silent! edit Xxx2')
     command('silent! edit Xxx1')
-    command('silent! edit Makefile') -- an existing file
+    command('silent! edit README.md') -- an existing file
     command('silent! split new2')
     expect_exit(command, 'silent! quit')
     eq('VimLeave done', string.match(read_file(test_file), '^%s*(.-)%s*$'))

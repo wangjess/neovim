@@ -1097,7 +1097,7 @@ func Test_fold_expr_error()
   endfor
 
   set foldmethod& foldexpr&
-  close!
+  bw!
 endfunc
 
 func Test_undo_fold_deletion()
@@ -1301,6 +1301,56 @@ func Test_foldtextresult()
   call assert_equal('+--  3 lines: Comment', foldtextresult(2))
 
   bw!
+endfunc
+
+" Test for foldtext and fillchars with 'rightleft' enabled
+func Test_foldtext_and_fillchars_rightleft()
+  CheckFeature rightleft
+  CheckScreendump
+  CheckRunVimInTerminal
+
+  let script_lines =<< trim END
+    let longtext = 'Lorem ipsum dolor sit amet, consectetur adipiscing'
+    let g:multibyte = 'Ｌｏｒｅｍ ｉｐｓｕｍ ｄｏｌｏｒ ｓｉｔ ａｍｅｔ'
+
+    call setline(1, [longtext, longtext, longtext])
+    1,2fold
+
+    setlocal rightleft
+    set noshowmode noshowcmd
+  END
+  call writefile(script_lines, 'XTest_foldtext_and_fillchars_rightleft', 'D')
+  let buf = RunVimInTerminal('-S XTest_foldtext_and_fillchars_rightleft', {'rows': 5, 'cols': 70})
+
+  call VerifyScreenDump(buf, 'Test_foldtext_and_fillchars_rightleft_01', {})
+  call term_sendkeys(buf, ":call setline(1, [g:multibyte, g:multibyte, g:multibyte])\<CR>")
+  call VerifyScreenDump(buf, 'Test_foldtext_and_fillchars_rightleft_02', {})
+
+  " clean up
+  call StopVimInTerminal(buf)
+endfunc
+
+" Test for foldtextresult() with 'rightleft' enabled
+func Test_foldtextresult_rightleft()
+  CheckFeature rightleft
+
+  let save_columns = &columns
+  new
+  set columns=70
+  setlocal rightleft
+
+  let longtext = 'Lorem ipsum dolor sit amet, consectetur adipiscing'
+  let multibyte = 'Ｌｏｒｅｍ ｉｐｓｕｍ ｄｏｌｏｒ ｓｉｔ ａｍｅｔ'
+
+  call setline(1, [longtext, longtext, longtext])
+  1,2fold
+  call assert_equal('+--  2 lines: ' .. longtext, foldtextresult(1))
+
+  call setline(1, [multibyte, multibyte, multibyte])
+  call assert_equal('+--  2 lines: ' .. multibyte, foldtextresult(1))
+
+  bw!
+  let &columns = save_columns
 endfunc
 
 " Test for merging two recursive folds when an intermediate line with no fold
@@ -1882,6 +1932,44 @@ func Test_cursor_fold_marker_undo()
   norm! zo
   norm! vjdu
   call assert_equal(1, foldlevel('.'))
+  bwipe!
+endfunc
+
+" The fold size must be compared against 'foldminlines' of the window that
+" contains the fold, not of the current window.
+func Test_foldminlines_per_window()
+  " Window with 'foldminlines'=5: its two-line fold stays displayed open.
+  new
+  setlocal foldenable foldmethod=manual foldminlines=5
+  call setline(1, ['one', 'two', 'three', 'four'])
+  2,3fold
+  call assert_equal(-1, foldclosed(2))
+  let winid = win_getid()
+
+  " Split; only the new current window gets 'foldminlines'=0.  setline()
+  " invalidates the fold sizes of both windows and measures them again right
+  " away, the other window's while this window is current.  win_execute()
+  " below only reads that cached verdict, without measuring again.
+  split
+  setlocal foldminlines=0
+  call setline(2, 'changed')
+  call assert_equal(2, foldclosed(2))
+  call win_execute(winid, 'call assert_equal(-1, foldclosed(2))')
+  bwipe!
+
+  " The same the other way around: 'foldminlines'=0 in the other window, so
+  " its fold must remain closed while the current window has a higher value.
+  new
+  setlocal foldenable foldmethod=manual foldminlines=0
+  call setline(1, ['one', 'two', 'three', 'four'])
+  2,3fold
+  call assert_equal(2, foldclosed(2))
+  let winid = win_getid()
+  split
+  setlocal foldminlines=5
+  call setline(2, 'changed')
+  call assert_equal(-1, foldclosed(2))
+  call win_execute(winid, 'call assert_equal(2, foldclosed(2))')
   bwipe!
 endfunc
 

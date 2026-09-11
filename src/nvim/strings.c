@@ -53,19 +53,19 @@ static const char e_aptypes_is_null_nr_str[]
   = "E1507: Internal error: ap_types or ap_types[idx] is NULL: %d: %s";
 
 static const char typename_unknown[] = N_("unknown");
-static const char typename_int[] = N_("int");
-static const char typename_longint[] = N_("long int");
-static const char typename_longlongint[] = N_("long long int");
-static const char typename_signedsizet[] = N_("signed size_t");
-static const char typename_unsignedint[] = N_("unsigned int");
-static const char typename_unsignedlongint[] = N_("unsigned long int");
-static const char typename_unsignedlonglongint[] = N_("unsigned long long int");
-static const char typename_sizet[] = N_("size_t");
+static const char typename_int[] = "int";
+static const char typename_longint[] = "long int";
+static const char typename_longlongint[] = "long long int";
+static const char typename_signedsizet[] = "signed size_t";
+static const char typename_unsignedint[] = "unsigned int";
+static const char typename_unsignedlongint[] = "unsigned long int";
+static const char typename_unsignedlonglongint[] = "unsigned long long int";
+static const char typename_sizet[] = "size_t";
 static const char typename_pointer[] = N_("pointer");
 static const char typename_percent[] = N_("percent");
-static const char typename_char[] = N_("char");
+static const char typename_char[] = "char";
 static const char typename_string[] = N_("string");
-static const char typename_float[] = N_("float");
+static const char typename_float[] = "float";
 
 /// Copy up to `len` bytes of `string` into newly allocated memory and
 /// terminate with a NUL. The allocated memory always has size `len + 1`, even
@@ -358,6 +358,24 @@ void vim_memcpy_up(char *restrict dst, const char *restrict src, size_t n)
   }
 }
 
+/// Multi-byte uppercase `src` into `dst`. `dst` must have room for the result.
+/// In the worst case, the uppercased form needs `strlen(src) * MB_MAXBYTES` bytes plus NUL.
+///
+/// @return number of bytes written to `dst`, not including the NUL terminator.
+size_t mb_strup_buf(const char *src, char *dst)
+  FUNC_ATTR_NONNULL_ALL
+{
+  size_t i = 0;
+  for (const char *p = src; *p != NUL;) {
+    CharInfo ci = utf_ptr2CharInfo(p);
+    int c = ci.value < 0 ? (uint8_t)(*p) : ci.value;
+    i += (size_t)utf_char2bytes(mb_toupper(c), dst + i);
+    p += ci.len;
+  }
+  dst[i] = NUL;
+  return i;
+}
+
 /// Make given string all upper-case or all lower-case
 ///
 /// Handles multi-byte characters as good as possible.
@@ -509,12 +527,14 @@ char *vim_strchr(const char *const string, const int c)
   if (c <= 0) {
     return NULL;
   } else if (c < 0x80) {
-    return strchr(string, c);
+    // NOLINTNEXTLINE(*-casting): remove once CI uses glibc 2.43
+    return (char *)strchr(string, c);
   } else {
     char u8char[MB_MAXBYTES + 1];
     const int len = utf_char2bytes(c, u8char);
     u8char[len] = NUL;
-    return strstr(string, u8char);
+    // NOLINTNEXTLINE(*-casting): remove once CI uses glibc 2.43
+    return (char *)strstr(string, u8char);
   }
 }
 
@@ -803,6 +823,10 @@ size_t vim_snprintf_safelen(char *str, size_t str_m, const char *fmt, ...)
   va_list ap;
   int str_l;
 
+  if (str_m == 0) {
+    return 0;
+  }
+
   va_start(ap, fmt);
   str_l = vim_vsnprintf_typval(str, str_m, fmt, ap, NULL);
   va_end(ap);
@@ -951,36 +975,36 @@ static int format_typeof(const char *type)
   return TYPE_UNKNOWN;
 }
 
-static char *format_typename(const char *type)
+static const char *format_typename(const char *type)
   FUNC_ATTR_NONNULL_ALL
 {
   switch (format_typeof(type)) {
   case TYPE_INT:
-    return _(typename_int);
+    return typename_int;
   case TYPE_LONGINT:
-    return _(typename_longint);
+    return typename_longint;
   case TYPE_LONGLONGINT:
-    return _(typename_longlongint);
+    return typename_longlongint;
   case TYPE_UNSIGNEDINT:
-    return _(typename_unsignedint);
+    return typename_unsignedint;
   case TYPE_SIGNEDSIZET:
-    return _(typename_signedsizet);
+    return typename_signedsizet;
   case TYPE_UNSIGNEDLONGINT:
-    return _(typename_unsignedlongint);
+    return typename_unsignedlongint;
   case TYPE_UNSIGNEDLONGLONGINT:
-    return _(typename_unsignedlonglongint);
+    return typename_unsignedlonglongint;
   case TYPE_SIZET:
-    return _(typename_sizet);
+    return typename_sizet;
   case TYPE_POINTER:
     return _(typename_pointer);
   case TYPE_PERCENT:
     return _(typename_percent);
   case TYPE_CHAR:
-    return _(typename_char);
+    return typename_char;
   case TYPE_STRING:
     return _(typename_string);
   case TYPE_FLOAT:
-    return _(typename_float);
+    return typename_float;
   }
 
   return _(typename_unknown);
@@ -989,6 +1013,11 @@ static char *format_typename(const char *type)
 static int adjust_types(const char ***ap_types, int arg, int *num_posarg, const char *type)
   FUNC_ATTR_NONNULL_ALL
 {
+  if (arg <= 0) {
+    semsg(_(e_invalid_format_specifier_str), type);
+    return FAIL;
+  }
+
   if (*ap_types == NULL || *num_posarg < arg) {
     const char **new_types = *ap_types == NULL
                              ? xcalloc((size_t)arg, sizeof(const char *))
@@ -1042,10 +1071,7 @@ static void format_overflow_error(const char *pstart)
     p++;
   }
 
-  size_t arglen = (size_t)(p - pstart);
-  char *argcopy = xstrnsave(pstart, arglen);
-  semsg(_(e_val_too_large), argcopy);
-  xfree(argcopy);
+  semsg(_(e_val_too_large_len), (int)(p - pstart), pstart);
 }
 
 enum { MAX_ALLOWED_STRING_WIDTH = 1048576, };  // 1MiB
@@ -1095,9 +1121,7 @@ static int parse_fmt_types(const char ***ap_types, int *num_posarg, const char *
 
   while (*p != NUL) {
     if (*p != '%') {
-      char *q = strchr(p + 1, '%');
-      size_t n = (q == NULL) ? strlen(p) : (size_t)(q - p);
-
+      size_t n = (size_t)(xstrchrnul(p + 1, '%') - p);
       p += n;
     } else {
       // allowed values: \0, h, l, L
@@ -1760,6 +1784,13 @@ int vim_vsnprintf_typval(char *str, size_t str_m, const char *fmt, va_list ap_st
                         va_arg(ap, const char *)));
 
           if (!str_arg) {
+#ifdef ENABLE_ASAN_UBSAN
+            // this is only for vsnprintf() emulation, v:_null_string handled in tv_str()
+            if (!tvs) {
+              __sanitizer_print_stack_trace();
+              __sanitizer_report_error_summary("SUMMARY: NULL argument passed to %s");
+            }
+#endif
             str_arg = "[NULL]";
             str_arg_l = 6;
           } else if (!precision_specified) {
@@ -2468,8 +2499,10 @@ static void byteidx_common(typval_T *argvars, typval_T *rettv, bool comp)
       if (c > 0xFFFF) {
         idx--;
       }
-    }
-    if (idx > 0) {
+      if (idx > 0) {
+        t += clen;
+      }
+    } else if (idx > 0) {
       t += ptr2len(t);
     }
   }
@@ -2993,7 +3026,7 @@ void f_utf16idx(typval_T *argvars, typval_T *rettv, EvalFuncData fptr)
     if (c > 0xFFFF) {
       len++;
     }
-    p += ptr2len(p);
+    p += clen;
     if (charidx) {
       idx--;
     }

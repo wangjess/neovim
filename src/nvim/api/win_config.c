@@ -8,22 +8,28 @@
 #include "nvim/api/private/defs.h"
 #include "nvim/api/private/dispatch.h"
 #include "nvim/api/private/helpers.h"
+#include "nvim/api/private/validate.h"
 #include "nvim/api/win_config.h"
 #include "nvim/ascii_defs.h"
 #include "nvim/autocmd.h"
 #include "nvim/autocmd_defs.h"
 #include "nvim/buffer.h"
 #include "nvim/buffer_defs.h"
+#include "nvim/charset.h"
+#include "nvim/context.h"
 #include "nvim/decoration_defs.h"
 #include "nvim/drawscreen.h"
 #include "nvim/errors.h"
 #include "nvim/eval/window.h"
+#include "nvim/ex_cmds_defs.h"
+#include "nvim/ex_docmd.h"
 #include "nvim/globals.h"
 #include "nvim/highlight_group.h"
 #include "nvim/macros_defs.h"
 #include "nvim/mbyte.h"
 #include "nvim/memory.h"
 #include "nvim/memory_defs.h"
+#include "nvim/move.h"
 #include "nvim/option.h"
 #include "nvim/option_vars.h"
 #include "nvim/pos_defs.h"
@@ -31,6 +37,7 @@
 #include "nvim/syntax.h"
 #include "nvim/types_defs.h"
 #include "nvim/ui.h"
+#include "nvim/ui_compositor.h"
 #include "nvim/ui_defs.h"
 #include "nvim/vim_defs.h"
 #include "nvim/window.h"
@@ -38,27 +45,21 @@
 
 #include "api/win_config.c.generated.h"
 
-/// Opens a new split window, or a floating window if `relative` is specified,
-/// or an external window (managed by the UI) if `external` is specified.
+#define HAS_KEY_X(d, key) HAS_KEY(d, win_config, key)
+
+/// Opens a new split window, floating window, or external window.
 ///
-/// Floats are windows that are drawn above the split layout, at some anchor
-/// position in some other window. Floats can be drawn internally or by external
-/// GUI with the |ui-multigrid| extension. External windows are only supported
-/// with multigrid GUIs, and are displayed as separate top-level windows.
-///
-/// For a general overview of floats, see |api-floatwin|.
-///
-/// The `width` and `height` of the new window must be specified when opening
-/// a floating window, but are optional for normal windows.
-///
-/// If `relative` and `external` are omitted, a normal "split" window is created.
-/// The `win` property determines which window will be split. If no `win` is
-/// provided or `win == 0`, a window will be created adjacent to the current window.
-/// If -1 is provided, a top-level split will be created. `vertical` and `split` are
-/// only valid for normal windows, and are used to control split direction. For `vertical`,
-/// the exact direction is determined by 'splitright' and 'splitbelow'.
-/// Split windows cannot have `bufpos`/`row`/`col`/`border`/`title`/`footer`
-/// properties.
+/// - Specify `relative` to create a floating window. Floats are drawn over the split layout,
+///   relative to a position in some other window. See |api-floatwin|.
+///   - Floats must specify `width` and `height`.
+/// - Specify `external` to create an external window. External windows are displayed as separate
+///   top-level windows managed by the |ui-multigrid| UI (not Nvim).
+/// - If `relative` and `external` are omitted, a normal "split" window is created.
+///   - The `win` key decides which window to split. If nil or 0, the split will be adjacent to
+///     the current window. If -1, a top-level split will be created.
+///   - Use `vertical` and `split` to control split direction. For `vertical`, the exact direction
+///     is determined by 'splitright' and 'splitbelow'.
+///   - Split windows cannot have `bufpos`, `row`, `col`, `border`, `title`, `footer`.
 ///
 /// With relative=editor (row=0,col=0) refers to the top-left corner of the
 /// screen-grid and (row=Lines-1,col=Columns-1) refers to the bottom-right
@@ -71,91 +72,31 @@
 /// could let floats hover outside of the main window like a tooltip, but
 /// this should not be used to specify arbitrary WM screen positions.
 ///
-/// Example (Lua): window-relative float
+/// Examples:
 ///
 /// ```lua
+/// -- Window-relative float with 'statusline' enabled:
+/// local w1 = vim.api.nvim_open_win(0, false,
+///   {relative='win', row=3, col=3, width=40, height=4})
+/// vim.wo[w1].statusline = vim.o.statusline
+///
+/// -- Buffer-relative float (travels as buffer is scrolled):
 /// vim.api.nvim_open_win(0, false,
-///   {relative='win', row=3, col=3, width=12, height=3})
+///   {relative='win', width=40, height=4, bufpos={100,10}})
+///
+/// -- Vertical split left of the current window:
+/// vim.api.nvim_open_win(0, false, { split = 'left', win = 0, })
 /// ```
 ///
-/// Example (Lua): buffer-relative float (travels as buffer is scrolled)
-///
-/// ```lua
-/// vim.api.nvim_open_win(0, false,
-///   {relative='win', width=12, height=3, bufpos={100,10}})
-/// ```
-///
-/// Example (Lua): vertical split left of the current window
-///
-/// ```lua
-/// vim.api.nvim_open_win(0, false, {
-///   split = 'left',
-///   win = 0
-/// })
-/// ```
-///
-/// @param buffer Buffer to display, or 0 for current buffer
+/// @param buf Buffer to display, or 0 for current buffer
 /// @param enter  Enter the window (make it the current window)
 /// @param config Map defining the window configuration. Keys:
-///   - relative: Sets the window layout to "floating", placed at (row,col)
-///                 coordinates relative to:
-///      - "cursor"     Cursor position in current window.
-///      - "editor"     The global editor grid.
-///      - "laststatus" 'laststatus' if present, or last row.
-///      - "mouse"      Mouse position.
-///      - "tabline"    Tabline if present, or first row.
-///      - "win"        Window given by the `win` field, or current window.
-///   - win: |window-ID| window to split, or relative window when creating a
-///      float (relative="win").
 ///   - anchor: Decides which corner of the float to place at (row,col):
 ///      - "NW" northwest (default)
 ///      - "NE" northeast
 ///      - "SW" southwest
 ///      - "SE" southeast
-///   - width: Window width (in character cells). Minimum of 1.
-///   - height: Window height (in character cells). Minimum of 1.
-///   - bufpos: Places float relative to buffer text (only when
-///       relative="win"). Takes a tuple of zero-indexed `[line, column]`.
-///       `row` and `col` if given are applied relative to this
-///       position, else they default to:
-///       - `row=1` and `col=0` if `anchor` is "NW" or "NE"
-///       - `row=0` and `col=0` if `anchor` is "SW" or "SE"
-///         (thus like a tooltip near the buffer text).
-///   - row: Row position in units of "screen cell height", may be fractional.
-///   - col: Column position in units of screen cell width, may be fractional.
-///   - focusable: Enable focus by user actions (wincmds, mouse events).
-///       Defaults to true. Non-focusable windows can be entered by
-///       |nvim_set_current_win()|, or, when the `mouse` field is set to true,
-///       by mouse events. See |focusable|.
-///   - mouse: Specify how this window interacts with mouse events.
-///       Defaults to `focusable` value.
-///       - If false, mouse events pass through this window.
-///       - If true, mouse events interact with this window normally.
-///   - external: GUI should display the window as an external
-///       top-level window. Currently accepts no other positioning
-///       configuration together with this.
-///   - zindex: Stacking order. floats with higher `zindex` go on top on
-///               floats with lower indices. Must be larger than zero. The
-///               following screen elements have hard-coded z-indices:
-///       - 100: insert completion popupmenu
-///       - 200: message scrollback
-///       - 250: cmdline completion popupmenu (when wildoptions+=pum)
-///     The default value for floats are 50.  In general, values below 100 are
-///     recommended, unless there is a good reason to overshadow builtin
-///     elements.
-///   - style: (optional) Configure the appearance of the window. Currently
-///       only supports one value:
-///       - "minimal"  Nvim will display the window with many UI options
-///                    disabled. This is useful when displaying a temporary
-///                    float where the text should not be edited. Disables
-///                    'number', 'relativenumber', 'cursorline', 'cursorcolumn',
-///                    'foldcolumn', 'spell' and 'list' options. 'signcolumn'
-///                    is changed to `auto` and 'colorcolumn' is cleared.
-///                    'statuscolumn' is changed to empty. The end-of-buffer
-///                     region is hidden by setting `eob` flag of
-///                    'fillchars' to a space char, and clearing the
-///                    |hl-EndOfBuffer| region in 'winhighlight'.
-///   - border: (`string|string[]`) (defaults to 'winborder' option) Window border. The string form
+///   - border: (`string|string[]`, default: 'winborder' option) Window border. The string form
 ///     accepts the same values as the 'winborder' option. The array form must have a length of
 ///     eight or any divisor of eight, specifying the chars that form the border in a clockwise
 ///     fashion starting from the top-left corner. For example, the double-box style can be
@@ -178,55 +119,95 @@
 ///     [ "", "", "", ">", "", "", "", "<" ]
 ///     ```
 ///     By default, |hl-FloatBorder| highlight is used, which links to |hl-WinSeparator| when not
-///     defined.  Each border side can specify an optional highlight:
+///     defined. Each border side can specify an optional highlight:
 ///     ```
 ///     [ ["+", "MyCorner"], ["x", "MyBorder"] ].
 ///     ```
-///   - title: (optional) Title in window border, string or list.
-///     List should consist of `[text, highlight]` tuples.
-///     If string, or a tuple lacks a highlight, the default highlight group is `FloatTitle`.
-///   - title_pos: Title position. Must be set with `title` option.
-///     Value can be one of "left", "center", or "right".
-///     Default is `"left"`.
-///   - footer: (optional) Footer in window border, string or list.
-///     List should consist of `[text, highlight]` tuples.
-///     If string, or a tuple lacks a highlight, the default highlight group is `FloatFooter`.
-///   - footer_pos: Footer position. Must be set with `footer` option.
-///     Value can be one of "left", "center", or "right".
-///     Default is `"left"`.
-///   - noautocmd: If true then all autocommands are blocked for the duration of
-///     the call.
+///   - bufpos: Places float relative to buffer text (only when
+///       relative="win"). Takes a tuple of zero-indexed `[line, column]`.
+///       `row` and `col` if given are applied relative to this
+///       position, else they default to:
+///       - `row=1` and `col=0` if `anchor` is "NW" or "NE"
+///       - `row=0` and `col=0` if `anchor` is "SW" or "SE"
+///         (thus like a tooltip near the buffer text).
+///   - col: Column position in units of screen cell width, may be fractional.
+///   - external: GUI should display the window as an external
+///       top-level window. Currently accepts no other positioning
+///       configuration together with this.
 ///   - fixed: If true when anchor is NW or SW, the float window
 ///            would be kept fixed even if the window would be truncated.
-///   - hide: If true the floating window will be hidden and the cursor will be invisible when
-///           focused on it.
-///   - vertical: Split vertically |:vertical|.
+///   - focusable: (default: true) Enable focus by user actions (wincmds, mouse events).
+///     Non-|focusable| windows can be entered by |nvim_set_current_win()|, or by mouse events if
+///     `mouse=true`.
+///   - footer: (`string|string[]?`) Footer in window border: string or list of `[text, highlight]`
+///     tuples. Default highlight group is `FloatFooter`.
+///   - footer_pos: (default: "left") Footer position. One of: "left", "center", "right". The
+///    `footer` field must be set also.
+///   - height: Window height (in character cells). Minimum of 1.
+///   - hide: Hides the floating window. |window-hidden|
+///   - mouse: (default: `focusable` value) If true, mouse events interact with the window
+///     normally; if false, they pass through to the window behind it.
+///   - noautocmd: Block all autocommands for the duration of the call. Cannot be changed by
+///     |nvim_win_set_config()|.
+///   - relative: Sets the window layout to "floating", placed at (row,col) coordinates relative to:
+///      - "cursor"     Cursor position in current window.
+///      - "editor"     The global editor grid.
+///      - "laststatus" 'laststatus' if present, or last row.
+///      - "mouse"      Mouse position.
+///      - "tabline"    Tabline if present, or first row.
+///      - "win"        Window given by the `win` field, or current window.
+///   - row: Row position in units of "screen cell height", may be fractional.
 ///   - split: Split direction: "left", "right", "above", "below".
+///   - style: (optional) Configure the appearance of the window:
+///       - ""         No special style.
+///       - "minimal"  Nvim will display the window with many UI options
+///                    disabled. This is useful when displaying a temporary
+///                    float where the text should not be edited. Disables
+///                    'number', 'relativenumber', 'cursorline', 'cursorcolumn',
+///                    'foldcolumn', 'spell' and 'list' options. 'signcolumn'
+///                    is changed to `auto` and 'colorcolumn' is cleared.
+///                    'statuscolumn' is changed to empty. The end-of-buffer
+///                     region is hidden by setting `eob` flag of
+///                    'fillchars' to a space char, and clearing the
+///                    |hl-EndOfBuffer| region in 'winhighlight'.
+///   - title: (optional) Title in window border, string or list.
+///       List should consist of `[text, highlight]` tuples.
+///       If string, or a tuple lacks a highlight, the default highlight group is `FloatTitle`.
+///   - title_pos: (default: "left") Title position. One of: "left", "center", "right". The `title`
+///     field must be set also.
+///   - vertical: Split vertically |:vertical|.
+///   - width: Window width (in character cells). Minimum of 1.
+///   - win: |window-ID| target window. Can be in a different tab page. Determines the window to
+///       split (negative values act like |:topleft|, |:botright|), the relative window for a
+///       `relative="win"` float, or just the target tab page (inferred from the window) for others.
+///   - zindex: (positive integer, default: 50) Stacking order. Floats with higher `zindex` overlay
+///     floats with lower indices. Below 100 is recommended, unless there is a good reason to
+///     overshadow builtin elements. The cursor is dimmed if an unfocused float above the cursor
+///     exceeds the zindex of the current window by 50. These screen elements have hard-coded
+///     z-indices:
+///       - 100: |ins-completion-menu| popupmenu
+///       - 200: message scrollback (|pager|)
+///       - 250: |cmdline-completion| popupmenu (wildoptions=pum)
 ///   - _cmdline_offset: (EXPERIMENTAL) When provided, anchor the |cmdline-completion|
 ///     popupmenu to this window, with an offset in screen cell width.
 ///
 /// @param[out] err Error details, if any
 ///
 /// @return |window-ID|, or 0 on error
-Window nvim_open_win(Buffer buffer, Boolean enter, Dict(win_config) *config, Error *err)
-  FUNC_API_SINCE(6) FUNC_API_TEXTLOCK_ALLOW_CMDWIN
+Window nvim_open_win(Buffer buf, Boolean enter, Dict(win_config) *config, Error *err)
+  FUNC_API_SINCE(6) FUNC_API_TEXTLOCK
 {
-#define HAS_KEY_X(d, key) HAS_KEY(d, win_config, key)
-  buf_T *buf = find_buffer_by_handle(buffer, err);
-  if (!buf) {
-    return 0;
-  }
-  if ((cmdwin_type != 0 && enter) || buf == cmdwin_buf) {
-    api_set_error(err, kErrorTypeException, "%s", e_cmdwin);
-    return 0;
-  }
-
-  WinConfig fconfig = WIN_CONFIG_INIT;
-  if (!parse_win_config(NULL, config, &fconfig, false, err)) {
+  buf_T *b = find_buffer_by_handle(buf, err);
+  if (!b) {
     return 0;
   }
 
   bool is_split = HAS_KEY_X(config, split) || HAS_KEY_X(config, vertical);
+  WinConfig fconfig = WIN_CONFIG_INIT;
+  if (!parse_win_config(NULL, config, &fconfig, false, !is_split, err)) {
+    return 0;
+  }
+
   Window rv = 0;
   if (fconfig.noautocmd) {
     block_autocmds();
@@ -266,13 +247,13 @@ Window nvim_open_win(Buffer buffer, Boolean enter, Dict(win_config) *config, Err
       if (parent == NULL || parent == curwin) {
         wp = win_split_ins(size, flags, NULL, 0, NULL);
       } else {
-        switchwin_T switchwin;
-        // `parent` is valid in `tp`, so switch_win should not fail.
-        const int result = switch_win(&switchwin, parent, tp, true);
-        assert(result == OK);
+        CtxSwitch switchwin;
+        // `parent` is valid in `tp`, so ctx_switch should not fail.
+        const bool result = ctx_switch(&switchwin, parent, tp, NULL, kCtxNoEvents | kCtxNoDisplay);
+        assert(result);
         (void)result;
         wp = win_split_ins(size, flags, NULL, 0, NULL);
-        restore_win(&switchwin, true);
+        ctx_restore(&switchwin);
       }
     });
     if (wp) {
@@ -281,15 +262,19 @@ Window nvim_open_win(Buffer buffer, Boolean enter, Dict(win_config) *config, Err
         // Without room for the requested size, window sizes may have been equalized instead.
         // If the size differs from what was requested, try to set it again now.
         if ((flags & WSP_VERT) && wp->w_width != size) {
-          win_setwidth_win(size, wp);
+          win_setwidth_win(size, wp, true);
         } else if (!(flags & WSP_VERT) && wp->w_height != size) {
-          win_setheight_win(size, wp);
+          win_setheight_win(size, wp, true);
         }
       }
     }
   } else {
-    if (!check_split_disallowed_err(curwin, err)) {
-      goto cleanup;  // error already set
+    // Unlike check_split_disallowed_err, ignore `split_disallowed`, as opening a float shouldn't
+    // mess with the frame structure. Still check `b_locked_split` to avoid opening more windows
+    // into a closing buffer, though.
+    if (curwin->w_buffer->b_locked_split) {  // Can't instead check `buf` in case win_set_buf fails!
+      api_set_error(err, kErrorTypeException, "E1159: Cannot open a float when closing the buffer");
+      goto cleanup;
     }
     wp = win_new_float(NULL, false, fconfig, err);
   }
@@ -305,25 +290,25 @@ Window nvim_open_win(Buffer buffer, Boolean enter, Dict(win_config) *config, Err
   }
 
   // Autocommands may close `wp` or move it to another tabpage, so update and check `tp` after each
-  // event. In each case, `wp` should already be valid in `tp`, so switch_win should not fail.
+  // event. In each case, `wp` should already be valid in `tp`, so ctx_switch should not fail.
   // Also, autocommands may free the `buf` to switch to, so store a bufref to check.
   bufref_T bufref;
-  set_bufref(&bufref, buf);
+  set_bufref(&bufref, b);
   if (!fconfig.noautocmd) {
-    switchwin_T switchwin;
-    const int result = switch_win_noblock(&switchwin, wp, tp, true);
-    assert(result == OK);
+    CtxSwitch switchwin;
+    const bool result = ctx_switch(&switchwin, wp, tp, NULL, kCtxNoDisplay);
+    assert(result);
     (void)result;
-    if (apply_autocmds(EVENT_WINNEW, NULL, NULL, false, curbuf)) {
+    if (apply_autocmds_win(EVENT_WINNEW, NULL, NULL, false, curbuf, wp)) {
       tp = win_find_tabpage(wp);
     }
-    restore_win_noblock(&switchwin, true);
+    ctx_restore(&switchwin);
   }
   if (tp && enter) {
     goto_tabpage_win(tp, wp);
     tp = win_find_tabpage(wp);
   }
-  if (tp && bufref_valid(&bufref) && buf != wp->w_buffer) {
+  if (tp && bufref_valid(&bufref) && b != wp->w_buffer) {
     // win_set_buf temporarily makes `wp` the curwin to set the buffer.
     // If not entering `wp`, block Enter and Leave events. (cringe)
     const bool au_no_enter_leave = curwin != wp && !fconfig.noautocmd;
@@ -331,7 +316,7 @@ Window nvim_open_win(Buffer buffer, Boolean enter, Dict(win_config) *config, Err
       autocmd_no_enter++;
       autocmd_no_leave++;
     }
-    win_set_buf(wp, buf, err);
+    win_set_buf(wp, b, err);
     if (!fconfig.noautocmd) {
       tp = win_find_tabpage(wp);
     }
@@ -341,6 +326,7 @@ Window nvim_open_win(Buffer buffer, Boolean enter, Dict(win_config) *config, Err
     }
   }
   if (!tp) {
+    api_clear_error(err);  // may have been set by win_set_buf
     api_set_error(err, kErrorTypeException, "Window was closed immediately");
     goto cleanup;
   }
@@ -348,6 +334,7 @@ Window nvim_open_win(Buffer buffer, Boolean enter, Dict(win_config) *config, Err
   if (fconfig.style == kWinStyleMinimal) {
     win_set_minimal_style(wp);
     didset_window_options(wp, true);
+    changed_window_setting(wp);
   }
   rv = wp->handle;
 
@@ -356,7 +343,6 @@ cleanup:
     unblock_autocmds();
   }
   return rv;
-#undef HAS_KEY_X
 }
 
 static WinSplit win_split_dir(win_T *win)
@@ -389,279 +375,415 @@ static int win_split_flags(WinSplit split, bool toplevel)
   return flags;
 }
 
-/// Configures window layout. Cannot be used to move the last window in a
-/// tabpage to a different one.
-///
-/// When reconfiguring a window, absent option keys will not be changed.
-/// `row`/`col` and `relative` must be reconfigured together.
-///
-/// @see |nvim_open_win()|
-///
-/// @param      window  |window-ID|, or 0 for current window
-/// @param      config  Map defining the window configuration,
-///                     see |nvim_open_win()|
-/// @param[out] err     Error details, if any
-void nvim_win_set_config(Window window, Dict(win_config) *config, Error *err)
-  FUNC_API_SINCE(6)
+/// Checks if window `wp` can be moved to tabpage `tp`.
+static bool win_can_move_tp(win_T *wp, tabpage_T *tp, Error *err)
+  FUNC_ATTR_NONNULL_ALL
 {
-#define HAS_KEY_X(d, key) HAS_KEY(d, win_config, key)
-  win_T *win = find_window_by_handle(window, err);
-  if (!win) {
-    return;
+  if (one_window(wp, tp == curtab ? NULL : tp)) {
+    api_set_error(err, kErrorTypeException, "Cannot move last non-floating window");
+    return false;
   }
+  // Like closing, moving windows between tabpages makes win_valid return false. Helpful when e.g:
+  // walking the window list, as w_next/w_prev can unexpectedly refer to windows in another tabpage!
+  // Check related locks, in case they were set to avoid checking win_valid.
+  if (win_locked(wp)) {
+    api_set_error(err, kErrorTypeException, "Cannot move window to another tabpage whilst in use");
+    return false;
+  }
+  if (window_layout_locked_err(CMD_SIZE, err)) {
+    return false;  // error already set
+  }
+  if (textlock || expr_map_locked()) {
+    api_set_error(err, kErrorTypeException, "%s", e_textlock);
+    return false;
+  }
+  if (is_ctx_win(wp)) {
+    api_set_error(err, kErrorTypeException, "Cannot move autocmd window to another tabpage");
+    return false;
+  }
+  return true;
+}
 
-  tabpage_T *win_tp = win_find_tabpage(win);
+static win_T *win_find_altwin(win_T *win, tabpage_T *tp)
+  FUNC_ATTR_NONNULL_ALL
+{
+  if (win->w_floating) {
+    return win_float_find_altwin(win, tp == curtab ? NULL : tp);
+  } else {
+    int dir;
+    return winframe_find_altwin(win, &dir, tp == curtab ? NULL : tp, NULL);
+  }
+}
+
+/// Configures `win` into a split, also moving it to another tabpage if requested.
+static bool win_config_split(win_T *win, const Dict(win_config) *config, WinConfig *fconfig,
+                             Error *err)
+  FUNC_ATTR_NONNULL_ALL
+{
   bool was_split = !win->w_floating;
   bool has_split = HAS_KEY_X(config, split);
   bool has_vertical = HAS_KEY_X(config, vertical);
-  // reuse old values, if not overridden
-  WinConfig fconfig = win->w_config;
-
-  bool to_split = config->relative.size == 0
-                  && !(HAS_KEY_X(config, external) ? config->external : fconfig.external)
-                  && (has_split || has_vertical || was_split);
-
-  if (!parse_win_config(win, config, &fconfig, !was_split || to_split, err)) {
-    return;
+  WinSplit old_split = win_split_dir(win);
+  if (has_vertical && !has_split) {
+    if (config->vertical) {
+      fconfig->split = (old_split == kWinSplitRight || p_spr) ? kWinSplitRight : kWinSplitLeft;
+    } else {
+      fconfig->split = (old_split == kWinSplitBelow || p_sb) ? kWinSplitBelow : kWinSplitAbove;
+    }
   }
 
-  if (was_split && !to_split) {
-    if (!win_new_float(win, false, fconfig, err)) {
-      return;
-    }
-    redraw_later(win, UPD_NOT_VALID);
-  } else if (to_split) {
-    win_T *parent = NULL;
-    tabpage_T *parent_tp = NULL;
-    if (config->win == 0) {
-      parent = curwin;
-      parent_tp = curtab;
-    } else if (config->win > 0) {
-      parent = find_window_by_handle(fconfig.window, err);
-      if (!parent) {
-        return;
-      }
-      parent_tp = win_find_tabpage(parent);
-    }
-    if (parent) {
-      if (parent->w_floating) {
-        api_set_error(err, kErrorTypeException, "Cannot split a floating window");
-        return;
-      }
-      if (is_aucmd_win(win) && win_tp != parent_tp) {
-        api_set_error(err, kErrorTypeException, "Cannot move autocmd window to another tabpage");
-        return;
-      }
-      // Can't move the cmdwin or its old curwin to a different tabpage.
-      if ((win == cmdwin_win || win == cmdwin_old_curwin) && win_tp != parent_tp) {
-        api_set_error(err, kErrorTypeException, "%s", e_cmdwin);
-        return;
-      }
-    }
+  // If there's no "vertical" or "split" set, or if "split" is unchanged, then we can just change
+  // the size of the window.
+  if ((!has_vertical && !has_split)
+      || (was_split && !HAS_KEY_X(config, win) && old_split == fconfig->split)) {
+    goto resize;
+  }
 
-    WinSplit old_split = win_split_dir(win);
-    if (has_vertical && !has_split) {
-      if (config->vertical) {
-        fconfig.split = (old_split == kWinSplitRight || p_spr) ? kWinSplitRight : kWinSplitLeft;
+  win_T *parent = NULL;
+  tabpage_T *parent_tp = NULL;
+  if (config->win == 0) {
+    parent = curwin;
+    parent_tp = curtab;
+  } else if (config->win > 0) {
+    parent = find_window_by_handle(fconfig->window, err);
+    if (!parent) {
+      return false;  // error already set
+    }
+    parent_tp = win_find_tabpage(parent);
+  }
+
+  tabpage_T *win_tp = win_find_tabpage(win);
+  if (parent) {
+    if (parent->w_floating) {
+      api_set_error(err, kErrorTypeException, "Cannot split a floating window");
+      return false;
+    }
+    if (win_tp != parent_tp && !win_can_move_tp(win, win_tp, err)) {
+      return false;  // error already set
+    }
+  }
+
+  if (!check_split_disallowed_err(win, err)) {
+    return false;  // error already set
+  }
+
+  bool to_split_ok = false;
+  // If we are moving curwin to another tabpage, switch windows *before* we remove it from the
+  // window list or remove its frame (if non-floating), so it's valid for autocommands.
+  const bool curwin_moving_tp = win == curwin && parent && win_tp != parent_tp;
+  if (curwin_moving_tp) {
+    win_T *altwin = win_find_altwin(win, win_tp);
+    assert(altwin);  // win_can_move_tp ensures `win` is not the only window
+    win_goto(altwin);
+
+    // Autocommands may have been a real nuisance and messed things up...
+    if (curwin == win) {
+      api_set_error(err, kErrorTypeException, "Failed to switch away from window %d", win->handle);
+      return false;
+    }
+    win_tp = win_find_tabpage(win);
+    if (!win_tp || !win_valid_any_tab(parent)) {
+      api_set_error(err, kErrorTypeException, "Windows to split were closed");
+      goto restore_curwin;
+    }
+    if (was_split == win->w_floating || parent->w_floating) {
+      api_set_error(err, kErrorTypeException, "Floating state of windows to split changed");
+      goto restore_curwin;
+    }
+  }
+
+  int dir = 0;
+  frame_T *unflat_altfr = NULL;
+  win_T *altwin = NULL;
+
+  if (was_split) {
+    // If the window is the last in the tabpage or `fconfig.win` is a handle to itself, we can't
+    // split it.
+    if (win->w_frame->fr_parent == NULL) {
+      // FIXME(willothy): if the window is the last in the tabpage but there is another tabpage and
+      // the target window is in that other tabpage, should we move the window to that tabpage and
+      // close the previous one, or just error?
+      api_set_error(err, kErrorTypeException, "Cannot move last non-floating window");
+      goto restore_curwin;
+    } else if (parent != NULL && parent->handle == win->handle) {
+      int n_frames = 0;
+      for (frame_T *fr = win->w_frame->fr_parent->fr_child; fr != NULL; fr = fr->fr_next) {
+        n_frames++;
+      }
+
+      win_T *neighbor = NULL;
+
+      if (n_frames > 2) {
+        // There are three or more windows in the frame, we need to split a neighboring window.
+        frame_T *frame = win->w_frame->fr_parent;
+
+        if (frame->fr_parent) {
+          //   ┌──────────────┐
+          //   │      A       │
+          //   ├────┬────┬────┤
+          //   │ B  │ C  │ D  │
+          //   └────┴────┴────┘
+          //          ||
+          //          \/
+          // ┌───────────────────┐
+          // │         A         │
+          // ├─────────┬─────────┤
+          // │         │    C    │
+          // │    B    ├─────────┤
+          // │         │    D    │
+          // └─────────┴─────────┘
+          if (fconfig->split == kWinSplitAbove || fconfig->split == kWinSplitLeft) {
+            neighbor = win->w_next;
+          } else {
+            neighbor = win->w_prev;
+          }
+        }
+        // If the frame doesn't have a parent, the old frame was the root frame and we need to
+        // create a top-level split.
+        altwin = winframe_remove(win, &dir, win_tp == curtab ? NULL : win_tp, &unflat_altfr);
+      } else if (n_frames == 2) {
+        // There are two windows in the frame, we can just rotate it.
+        altwin = winframe_remove(win, &dir, win_tp == curtab ? NULL : win_tp, &unflat_altfr);
+        neighbor = altwin;
       } else {
-        fconfig.split = (old_split == kWinSplitBelow || p_sb) ? kWinSplitBelow : kWinSplitAbove;
+        // There is only one window in the frame, we can't split it.
+        api_set_error(err, kErrorTypeException, "Cannot split window into itself");
+        goto restore_curwin;
       }
+      // Set the parent to whatever the correct neighbor window was determined to be.
+      parent = neighbor;
+    } else {
+      altwin = winframe_remove(win, &dir, win_tp == curtab ? NULL : win_tp, &unflat_altfr);
     }
-    merge_win_config(&win->w_config, fconfig);
+  } else {
+    altwin = win_float_find_altwin(win, win_tp == curtab ? NULL : win_tp);
+  }
 
-    // If there's no "vertical" or "split" set, or if "split" is unchanged,
-    // then we can just change the size of the window.
-    if ((!has_vertical && !has_split)
-        || (was_split && !HAS_KEY_X(config, win) && old_split == fconfig.split)) {
-      if (HAS_KEY_X(config, width)) {
-        win_setwidth_win(fconfig.width, win);
-      }
-      if (HAS_KEY_X(config, height)) {
-        win_setheight_win(fconfig.height, win);
-      }
-      redraw_later(win, UPD_NOT_VALID);
-      return;
+  win_remove(win, win_tp == curtab ? NULL : win_tp);
+  if (win_tp == curtab) {
+    last_status(false);  // may need to remove last status line
+    win_comp_pos();  // recompute window positions
+  }
+
+  int flags = win_split_flags(fconfig->split, parent == NULL) | WSP_NOENTER;
+  parent_tp = parent ? win_find_tabpage(parent) : curtab;
+
+  TRY_WRAP(err, {
+    const bool need_switch = parent != NULL && parent != curwin;
+    CtxSwitch switchwin;
+    if (need_switch) {
+      // `parent` is valid in its tabpage, so ctx_switch should not fail.
+      const bool result = ctx_switch(&switchwin, parent, parent_tp, NULL,
+                                     kCtxNoEvents | kCtxNoDisplay);
+      (void)result;
+      assert(result);
+    }
+    to_split_ok = win_split_ins(0, flags, win, 0, unflat_altfr) != NULL;
+    if (!to_split_ok) {
+      // Restore `win` to the window list now, so it's valid for ctx_restore (if used).
+      win_append(win->w_prev, win, win_tp == curtab ? NULL : win_tp);
+    }
+    if (need_switch) {
+      ctx_restore(&switchwin);
+    }
+  });
+  if (!to_split_ok) {
+    if (was_split) {
+      // win_split_ins doesn't change sizes or layout if it fails to insert an existing window, so
+      // just undo winframe_remove.
+      winframe_restore(win, dir, unflat_altfr);
+    }
+    if (!ERROR_SET(err)) {
+      api_set_error(err, kErrorTypeException, "Failed to move window %d into split", win->handle);
     }
 
-    if (!check_split_disallowed_err(win, err)) {
-      return;  // error already set
+restore_curwin:
+    // If `win` was the original curwin, and autocommands didn't move it outside of curtab, be a
+    // good citizen and try to return to it.
+    if (curwin_moving_tp && win_valid(win)) {
+      win_goto(win);
     }
+    return false;
+  }
 
-    bool to_split_ok = false;
+  // If `win` moved tabpages and was the curwin of its old one, select a new curwin for it.
+  if (win_tp != parent_tp && win_tp->tp_curwin == win) {
+    win_tp->tp_curwin = altwin;
+  }
+
+resize:
+  if (HAS_KEY_X(config, width)) {
+    win_setwidth_win(fconfig->width, win, true);
+  }
+  if (HAS_KEY_X(config, height)) {
+    win_setheight_win(fconfig->height, win, true);
+  }
+
+  // Merge configs now. If previously a float, clear fields irrelevant to splits that `fconfig` may
+  // have shallowly copied; don't free them as win_split_ins handled that. If already a split,
+  // clearing isn't needed, as parse_win_config shouldn't allow setting irrelevant fields.
+  if (!was_split) {
+    clear_float_config(fconfig, false);
+  }
+  merge_win_config(&win->w_config, *fconfig);
+  return true;
+}
+
+/// Configures `win` into a float, also moving it to another tabpage if requested.
+static bool win_config_float_tp(win_T *win, const Dict(win_config) *config,
+                                const WinConfig *fconfig, Error *err)
+  FUNC_ATTR_NONNULL_ALL
+{
+  tabpage_T *win_tp = win_find_tabpage(win);
+  win_T *parent = win;
+  tabpage_T *parent_tp = win_tp;
+  if (HAS_KEY_X(config, win)) {
+    parent = find_window_by_handle(fconfig->window, err);
+    if (!parent) {
+      return false;  // error already set
+    }
+    parent_tp = win_find_tabpage(parent);
+  }
+
+  bool curwin_moving_tp = false;
+  win_T *altwin = NULL;
+
+  if (win_tp != parent_tp) {
+    if (!win_can_move_tp(win, win_tp, err)) {
+      return false;  // error already set
+    }
+    altwin = win_find_altwin(win, win_tp);
+    assert(altwin);  // win_can_move_tp ensures `win` is not the only window
+
     // If we are moving curwin to another tabpage, switch windows *before* we remove it from the
     // window list or remove its frame (if non-floating), so it's valid for autocommands.
-    const bool curwin_moving_tp = win == curwin && parent && win_tp != parent_tp;
-    if (curwin_moving_tp) {
-      if (was_split) {
-        int dir;
-        win_T *altwin = winframe_find_altwin(win, &dir, NULL, NULL);
-        // Autocommands may still make this the last non-float after this check.
-        // That case will be caught later when trying to move the window.
-        if (!altwin) {
-          api_set_error(err, kErrorTypeException, "Cannot move last non-floating window");
-          return;
-        }
-        win_goto(altwin);
-      } else {
-        win_goto(win_float_find_altwin(win, NULL));
-      }
+    if (curwin == win) {
+      curwin_moving_tp = true;
+      win_goto(altwin);
 
       // Autocommands may have been a real nuisance and messed things up...
       if (curwin == win) {
         api_set_error(err, kErrorTypeException, "Failed to switch away from window %d",
                       win->handle);
-        return;
+        return false;
       }
       win_tp = win_find_tabpage(win);
-      if (!win_tp || !win_valid_any_tab(parent)) {
-        api_set_error(err, kErrorTypeException, "Windows to split were closed");
+      parent_tp = win_find_tabpage(parent);
+
+      if (!win_tp || !parent_tp) {
+        api_set_error(err, kErrorTypeException, "Target windows were closed");
         goto restore_curwin;
       }
-      if (was_split == win->w_floating || parent->w_floating) {
-        api_set_error(err, kErrorTypeException, "Floating state of windows to split changed");
-        goto restore_curwin;
+      if (win_tp != parent_tp && !win_can_move_tp(win, win_tp, err)) {
+        goto restore_curwin;  // error already set
       }
+      altwin = win_find_altwin(win, win_tp);
+      assert(altwin);  // win_can_move_tp ensures `win` is not the only window
     }
+  }
 
-    int dir = 0;
-    frame_T *unflat_altfr = NULL;
-    win_T *altwin = NULL;
-
-    if (was_split) {
-      // If the window is the last in the tabpage or `fconfig.win` is
-      // a handle to itself, we can't split it.
-      if (win->w_frame->fr_parent == NULL) {
-        // FIXME(willothy): if the window is the last in the tabpage but there is another tabpage
-        // and the target window is in that other tabpage, should we move the window to that
-        // tabpage and close the previous one, or just error?
-        api_set_error(err, kErrorTypeException, "Cannot move last non-floating window");
-        goto restore_curwin;
-      } else if (parent != NULL && parent->handle == win->handle) {
-        int n_frames = 0;
-        for (frame_T *fr = win->w_frame->fr_parent->fr_child; fr != NULL; fr = fr->fr_next) {
-          n_frames++;
-        }
-
-        win_T *neighbor = NULL;
-
-        if (n_frames > 2) {
-          // There are three or more windows in the frame, we need to split a neighboring window.
-          frame_T *frame = win->w_frame->fr_parent;
-
-          if (frame->fr_parent) {
-            //   ┌──────────────┐
-            //   │      A       │
-            //   ├────┬────┬────┤
-            //   │ B  │ C  │ D  │
-            //   └────┴────┴────┘
-            //          ||
-            //          \/
-            // ┌───────────────────┐
-            // │         A         │
-            // ├─────────┬─────────┤
-            // │         │    C    │
-            // │    B    ├─────────┤
-            // │         │    D    │
-            // └─────────┴─────────┘
-            if (fconfig.split == kWinSplitAbove || fconfig.split == kWinSplitLeft) {
-              neighbor = win->w_next;
-            } else {
-              neighbor = win->w_prev;
-            }
-          }
-          // If the frame doesn't have a parent, the old frame
-          // was the root frame and we need to create a top-level split.
-          altwin = winframe_remove(win, &dir, win_tp == curtab ? NULL : win_tp, &unflat_altfr);
-        } else if (n_frames == 2) {
-          // There are two windows in the frame, we can just rotate it.
-          altwin = winframe_remove(win, &dir, win_tp == curtab ? NULL : win_tp, &unflat_altfr);
-          neighbor = altwin;
-        } else {
-          // There is only one window in the frame, we can't split it.
-          api_set_error(err, kErrorTypeException, "Cannot split window into itself");
-          goto restore_curwin;
-        }
-        // Set the parent to whatever the correct neighbor window was determined to be.
-        parent = neighbor;
-      } else {
-        altwin = winframe_remove(win, &dir, win_tp == curtab ? NULL : win_tp, &unflat_altfr);
-      }
-    } else {
-      altwin = win_float_find_altwin(win, win_tp == curtab ? NULL : win_tp);
-    }
-
-    win_remove(win, win_tp == curtab ? NULL : win_tp);
-    if (win_tp == curtab) {
-      last_status(false);  // may need to remove last status line
-      win_comp_pos();  // recompute window positions
-    }
-
-    int flags = win_split_flags(fconfig.split, parent == NULL) | WSP_NOENTER;
-    parent_tp = parent ? win_find_tabpage(parent) : curtab;
-
-    TRY_WRAP(err, {
-      const bool need_switch = parent != NULL && parent != curwin;
-      switchwin_T switchwin;
-      if (need_switch) {
-        // `parent` is valid in its tabpage, so switch_win should not fail.
-        const int result = switch_win(&switchwin, parent, parent_tp, true);
-        (void)result;
-        assert(result == OK);
-      }
-      to_split_ok = win_split_ins(0, flags, win, 0, unflat_altfr) != NULL;
-      if (!to_split_ok) {
-        // Restore `win` to the window list now, so it's valid for restore_win (if used).
-        win_append(win->w_prev, win, win_tp == curtab ? NULL : win_tp);
-      }
-      if (need_switch) {
-        restore_win(&switchwin, true);
-      }
-    });
-    if (!to_split_ok) {
-      if (was_split) {
-        // win_split_ins doesn't change sizes or layout if it fails to insert an existing window, so
-        // just undo winframe_remove.
-        winframe_restore(win, dir, unflat_altfr);
-      }
-      if (!ERROR_SET(err)) {
-        api_set_error(err, kErrorTypeException, "Failed to move window %d into split", win->handle);
-      }
-
+  // Convert the window to a float if needed.
+  if (!win->w_floating) {
+    if (!win_new_float(win, false, *fconfig, err)) {
 restore_curwin:
       // If `win` was the original curwin, and autocommands didn't move it outside of curtab, be a
       // good citizen and try to return to it.
       if (curwin_moving_tp && win_valid(win)) {
         win_goto(win);
       }
-      return;
+      return false;
     }
+    redraw_later(win, UPD_NOT_VALID);
+  }
 
-    // If `win` moved tabpages and was the curwin of its old one, select a new curwin for it.
-    if (win_tp != parent_tp && win_tp->tp_curwin == win) {
+  if (win_tp != parent_tp) {
+    win_remove(win, win_tp == curtab ? NULL : win_tp);
+    tabpage_T *append_tp = parent_tp == curtab ? NULL : parent_tp;
+    win_append(lastwin_nofloating(append_tp), win, append_tp);
+
+    // If `win` was the curwin of its old tabpage, select a new curwin for it.
+    if (win_tp != curtab && win_tp->tp_curwin == win) {
       win_tp->tp_curwin = altwin;
     }
 
-    if (HAS_KEY_X(config, width)) {
-      win_setwidth_win(fconfig.width, win);
-    }
-    if (HAS_KEY_X(config, height)) {
-      win_setheight_win(fconfig.height, win);
+    // Remove grid if present. More reliable than checking curtab, as tabpage_check_windows may not
+    // run when temporarily switching tabpages, meaning grids may be stale from another tabpage!
+    // (e.g: ctx_switch with kCtxNoDisplay)
+    ui_comp_remove_grid(&win->w_grid_alloc);
+
+    // Redraw tabline, update window's hl attribs, etc. Set must_redraw here, as redraw_later might
+    // not if w_redr_type >= UPD_NOT_VALID was set in the old tabpage.
+    redraw_later(win, UPD_NOT_VALID);
+    set_must_redraw(UPD_NOT_VALID);
+  }
+
+  win_config_float(win, *fconfig);
+  return true;
+}
+
+/// Reconfigures the layout and properties of a window.
+///
+/// - Updates only the given keys; unspecified (`nil`) keys will not be changed.
+/// - Can move a window to another tabpage.
+/// - Can transform a window to/from a float.
+/// - Keys `row` / `col` / `relative` must be specified together.
+/// - Cannot move the last window in a tabpage to a different one.
+///
+/// Example: to convert a floating window to a "normal" split window, specify the `win` field:
+///
+/// ```lua
+/// vim.api.nvim_win_set_config(0, { split = 'above', win = vim.fn.win_getid(1), })
+/// ```
+///
+/// @see |nvim_open_win()|
+///
+/// @param      win  |window-ID|, or 0 for current window
+/// @param      config  Map defining the window configuration, see [nvim_open_win()]
+/// @param[out] err     Error details, if any
+void nvim_win_set_config(Window win, Dict(win_config) *config, Error *err)
+  FUNC_API_SINCE(6)
+{
+  win_T *w = find_window_by_handle(win, err);
+  if (!w) {
+    return;
+  }
+
+  bool was_split = !w->w_floating;
+  bool has_split = HAS_KEY_X(config, split);
+  bool has_vertical = HAS_KEY_X(config, vertical);
+  WinStyle old_style = w->w_config.style;
+  // reuse old values, if not overridden
+  WinConfig fconfig = w->w_config;
+
+  bool to_split = config->relative.size == 0
+                  && !(HAS_KEY_X(config, external) && config->external)
+                  && (has_split || has_vertical || was_split);
+  bool will_float = (!was_split && !to_split) || config->relative.size > 0 || config->external;
+
+  if (!parse_win_config(w, config, &fconfig, !was_split || to_split, will_float, err)) {
+    return;
+  }
+
+  if (to_split) {
+    if (!win_config_split(w, config, &fconfig, err)) {
+      return;
     }
   } else {
-    win_config_float(win, fconfig);
-  }
-  if (HAS_KEY_X(config, style)) {
-    if (fconfig.style == kWinStyleMinimal) {
-      win_set_minimal_style(win);
-      didset_window_options(win, true);
+    if (!win_config_float_tp(w, config, &fconfig, err)) {
+      return;
     }
   }
+
+  if (fconfig.style == kWinStyleMinimal && old_style != fconfig.style) {
+    win_set_minimal_style(w);
+    didset_window_options(w, true);
+    changed_window_setting(w);
+  }
   if (fconfig._cmdline_offset < INT_MAX) {
-    cmdline_win = win;
-  } else if (win == cmdline_win && fconfig._cmdline_offset == INT_MAX) {
+    cmdline_win = w;
+  } else if (w == cmdline_win && fconfig._cmdline_offset == INT_MAX) {
     cmdline_win = NULL;
   }
-#undef HAS_KEY_X
 }
 
 #define PUT_KEY_X(d, key, value) PUT_KEY(d, win_config, key, value)
@@ -707,16 +829,20 @@ static void config_put_bordertext(Dict(win_config) *config, WinConfig *fconfig,
   }
 }
 
-/// Gets window configuration.
+/// Gets window config as a dict which can be passed to |nvim_open_win()| as the `config` parameter.
 ///
-/// The returned value may be given to |nvim_open_win()|.
+/// For non-floating windows, `relative` is empty, thus you can check that field to detect if
+/// a window is a floatwin:
+/// ```lua
+/// vim.print(vim.api.nvim_win_get_config(0).relative == '' and 'non-float' or 'float')
+/// -- Or use win_gettype().
+/// vim.print(vim.fn.win_gettype())
+/// ```
 ///
-/// `relative` is empty for normal windows.
-///
-/// @param      window |window-ID|, or 0 for current window
+/// @param      win |window-ID|, or 0 for current window
 /// @param[out] err Error details, if any
 /// @return     Map defining the window configuration, see |nvim_open_win()|
-Dict(win_config) nvim_win_get_config(Window window, Arena *arena, Error *err)
+Dict(win_config) nvim_win_get_config(Window win, Arena *arena, Error *err)
   FUNC_API_SINCE(6)
 {
   /// Keep in sync with FloatRelative in buffer_defs.h
@@ -727,9 +853,12 @@ Dict(win_config) nvim_win_get_config(Window window, Arena *arena, Error *err)
   /// Keep in sync with WinSplit in buffer_defs.h
   static const char *const win_split_str[] = { "left", "right", "above", "below" };
 
+  /// Keep in sync with WinStyle in buffer_defs.h
+  static const char *const win_style_str[] = { "", "minimal" };
+
   Dict(win_config) rv = KEYDICT_INIT;
 
-  win_T *wp = find_window_by_handle(window, err);
+  win_T *wp = find_window_by_handle(win, err);
   if (!wp) {
     return rv;
   }
@@ -740,6 +869,7 @@ Dict(win_config) nvim_win_get_config(Window window, Arena *arena, Error *err)
   PUT_KEY_X(rv, external, config->external);
   PUT_KEY_X(rv, hide, config->hide);
   PUT_KEY_X(rv, mouse, config->mouse);
+  PUT_KEY_X(rv, style, cstr_as_string(win_style_str[config->style]));
 
   if (wp->w_floating) {
     PUT_KEY_X(rv, width, config->width);
@@ -871,50 +1001,39 @@ static bool parse_float_bufpos(Array bufpos, lpos_T *out)
   return true;
 }
 
-static void parse_bordertext(Object bordertext, BorderTextType bordertext_type, WinConfig *fconfig,
-                             Error *err)
+void parse_bordertext(Object bordertext, BorderTextType bordertext_type, WinConfig *fconfig,
+                      Error *err)
 {
-  if (bordertext.type != kObjectTypeString && bordertext.type != kObjectTypeArray) {
-    api_set_error(err, kErrorTypeValidation, "title/footer must be string or array");
+  VALIDATE_EXP(!(bordertext.type != kObjectTypeString && bordertext.type != kObjectTypeArray),
+               "title/footer", "String or Array", api_typename(bordertext.type), {
     return;
-  }
+  });
 
-  if (bordertext.type == kObjectTypeArray && bordertext.data.array.size == 0) {
-    api_set_error(err, kErrorTypeValidation, "title/footer cannot be an empty array");
+  VALIDATE_EXP(!(bordertext.type == kObjectTypeArray && bordertext.data.array.size == 0),
+               "title/footer", "non-empty Array", NULL, {
     return;
-  }
+  });
 
-  bool *is_present;
-  VirtText *chunks;
-  int *width;
-  switch (bordertext_type) {
-  case kBorderTextTitle:
-    is_present = &fconfig->title;
-    chunks = &fconfig->title_chunks;
-    width = &fconfig->title_width;
-    break;
-  case kBorderTextFooter:
-    is_present = &fconfig->footer;
-    chunks = &fconfig->footer_chunks;
-    width = &fconfig->footer_width;
-    break;
-  }
+  bool is_title = bordertext_type == kBorderTextTitle;
+  bool *is_present = is_title ? &fconfig->title : &fconfig->footer;
+  VirtText *chunks = is_title ? &fconfig->title_chunks : &fconfig->footer_chunks;
+  int *width = is_title ? &fconfig->title_width : &fconfig->footer_width;
 
   if (bordertext.type == kObjectTypeString) {
     if (bordertext.data.string.size == 0) {
       *is_present = false;
       return;
     }
+    char *text = transstr(bordertext.data.string.data, true);
     kv_init(*chunks);
-    kv_push(*chunks, ((VirtTextChunk){ .text = xstrdup(bordertext.data.string.data),
-                                       .hl_id = -1 }));
-    *width = (int)mb_string2cells(bordertext.data.string.data);
-    *is_present = true;
-    return;
+    kv_push(*chunks, ((VirtTextChunk){ .text = text, .hl_id = -1 }));
+    *width = (int)mb_string2cells(text);
+  } else {
+    *chunks = parse_virt_text(bordertext.data.array, err, width, true);
+    if (ERROR_SET(err)) {
+      return;
+    }
   }
-
-  *width = 0;
-  *chunks = parse_virt_text(bordertext.data.array, err, width);
 
   *is_present = true;
 }
@@ -948,15 +1067,9 @@ static bool parse_bordertext_pos(win_T *wp, String bordertext_pos, BorderTextTyp
   } else if (strequal(pos, "right")) {
     *align = kAlignRight;
   } else {
-    switch (bordertext_type) {
-    case kBorderTextTitle:
-      api_set_error(err, kErrorTypeValidation, "invalid title_pos value");
-      break;
-    case kBorderTextFooter:
-      api_set_error(err, kErrorTypeValidation, "invalid footer_pos value");
-      break;
-    }
-    return false;
+    VALIDATE_S(false, (bordertext_type == kBorderTextTitle ? "title_pos" : "footer_pos"), pos, {
+      return false;
+    });
   }
   return true;
 }
@@ -985,24 +1098,22 @@ void parse_border_style(Object style, WinConfig *fconfig, Error *err)
   if (style.type == kObjectTypeArray) {
     Array arr = style.data.array;
     size_t size = arr.size;
-    if (!size || size > 8 || (size & (size - 1))) {
-      api_set_error(err, kErrorTypeValidation, "invalid number of border chars");
+    VALIDATE_EXP(!(!size || size > 8 || (size & (size - 1))),
+                 "border", "1, 2, 4, or 8 chars", NULL, {
       return;
-    }
+    });
     for (size_t i = 0; i < size; i++) {
       Object iytem = arr.items[i];
       String string;
       int hl_id = 0;
       if (iytem.type == kObjectTypeArray) {
         Array iarr = iytem.data.array;
-        if (!iarr.size || iarr.size > 2) {
-          api_set_error(err, kErrorTypeValidation, "invalid border char");
+        VALIDATE_EXP(!(!iarr.size || iarr.size > 2), "border", "1 or 2-item Array", NULL, {
           return;
-        }
-        if (iarr.items[0].type != kObjectTypeString) {
-          api_set_error(err, kErrorTypeValidation, "invalid border char");
+        });
+        VALIDATE_EXP(iarr.items[0].type == kObjectTypeString, "border", "Array of Strings", NULL, {
           return;
-        }
+        });
         string = iarr.items[0].data.string;
         if (iarr.size == 2) {
           hl_id = object_to_hl_id(iarr.items[1], "border char highlight", err);
@@ -1013,13 +1124,14 @@ void parse_border_style(Object style, WinConfig *fconfig, Error *err)
       } else if (iytem.type == kObjectTypeString) {
         string = iytem.data.string;
       } else {
-        api_set_error(err, kErrorTypeValidation, "invalid border char");
-        return;
+        VALIDATE_EXP(false, "border", "String or Array", api_typename(iytem.type), {
+          return;
+        });
       }
-      if (string.size && mb_string2cells_len(string.data, string.size) > 1) {
-        api_set_error(err, kErrorTypeValidation, "border chars must be one cell");
+      VALIDATE_EXP(!(string.size && mb_string2cells_len(string.data, string.size) > 1),
+                   "border", "only one-cell chars", NULL, {
         return;
-      }
+      });
       size_t len = MIN(string.size, sizeof(*chars) - 1);
       if (len) {
         memcpy(chars[i], string.data, len);
@@ -1032,12 +1144,13 @@ void parse_border_style(Object style, WinConfig *fconfig, Error *err)
       memcpy(hl_ids + size, hl_ids, sizeof(*hl_ids) * size);
       size <<= 1;
     }
-    if ((chars[7][0] && chars[1][0] && !chars[0][0])
-        || (chars[1][0] && chars[3][0] && !chars[2][0])
-        || (chars[3][0] && chars[5][0] && !chars[4][0])
-        || (chars[5][0] && chars[7][0] && !chars[6][0])) {
-      api_set_error(err, kErrorTypeValidation, "corner between used edges must be specified");
-    }
+    VALIDATE_EXP(!((chars[7][0] && chars[1][0] && !chars[0][0])
+                   || (chars[1][0] && chars[3][0] && !chars[2][0])
+                   || (chars[3][0] && chars[5][0] && !chars[4][0])
+                   || (chars[5][0] && chars[7][0] && !chars[6][0])), "border",
+                 "corner char between edge chars", NULL, {
+      return;
+    });
   } else if (style.type == kObjectTypeString) {
     String str = style.data.string;
     if (str.size == 0 || strequal(str.data, "none")) {
@@ -1063,7 +1176,9 @@ void parse_border_style(Object style, WinConfig *fconfig, Error *err)
         return;
       }
     }
-    api_set_error(err, kErrorTypeValidation, "invalid border style \"%s\"", str.data);
+    VALIDATE_S(false, "border", str.data, {
+      return;
+    });
   }
 }
 
@@ -1071,10 +1186,10 @@ static void generate_api_error(win_T *wp, const char *attribute, Error *err)
 {
   if (wp != NULL && wp->w_floating) {
     api_set_error(err, kErrorTypeValidation,
-                  "Missing 'relative' field when reconfiguring floating window %d",
+                  "Required: 'relative' when reconfiguring floating window %d",
                   wp->handle);
   } else {
-    api_set_error(err, kErrorTypeValidation, "non-float cannot have '%s'", attribute);
+    VALIDATE_CON(false, attribute, "non-float window", {});
   }
 }
 
@@ -1089,27 +1204,20 @@ bool parse_winborder(WinConfig *fconfig, char *border_opt, Error *err)
   if (strchr(border_opt, ',')) {
     Array border_chars = ARRAY_DICT_INIT;
     char *p = border_opt;
-    char part[MAX_SCHAR_SIZE] = { 0 };
-    int count = 0;
-
-    while (*p != NUL) {
-      if (count >= 8) {
+    while (true) {
+      if (border_chars.size >= 8) {
         api_free_array(border_chars);
         return false;
       }
-
-      size_t part_len = copy_option_part(&p, part, sizeof(part), ",");
-      if (part_len == 0 || part[0] == NUL) {
-        api_free_array(border_chars);
-        return false;
+      char *comma = strchr(p, ',');
+      size_t part_len = comma != NULL ? (size_t)(comma - p) : strlen(p);
+      ADD(border_chars, STRING_OBJ(cbuf_to_string(p, part_len)));
+      if (comma == NULL) {
+        break;
       }
-
-      String str = cstr_to_string(part);
-      ADD(border_chars, STRING_OBJ(str));
-      count++;
+      p = comma + 1;
     }
-
-    if (count != 8) {
+    if (border_chars.size != 8) {
       api_free_array(border_chars);
       return false;
     }
@@ -1125,21 +1233,19 @@ bool parse_winborder(WinConfig *fconfig, char *border_opt, Error *err)
 }
 
 static bool parse_win_config(win_T *wp, Dict(win_config) *config, WinConfig *fconfig, bool reconf,
-                             Error *err)
+                             bool will_float, Error *err)
 {
-#define HAS_KEY_X(d, key) HAS_KEY(d, win_config, key)
   bool has_relative = false, relative_is_win = false, is_split = false;
   if (config->relative.size > 0) {
-    if (!parse_float_relative(config->relative, &fconfig->relative)) {
-      api_set_error(err, kErrorTypeValidation, "Invalid value of 'relative' key");
+    VALIDATE_S(parse_float_relative(config->relative, &fconfig->relative),
+               "relative", config->relative.data, {
       goto fail;
-    }
+    });
 
-    if (config->relative.size > 0 && !(HAS_KEY_X(config, row) && HAS_KEY_X(config, col))
-        && !HAS_KEY_X(config, bufpos)) {
-      api_set_error(err, kErrorTypeValidation, "'relative' requires 'row'/'col' or 'bufpos'");
+    VALIDATE_R(!(config->relative.size > 0 && !(HAS_KEY_X(config, row) && HAS_KEY_X(config, col))
+                 && !HAS_KEY_X(config, bufpos)), "'relative' requires 'row'/'col' or 'bufpos'", {
       goto fail;
-    }
+    });
 
     has_relative = true;
     fconfig->external = false;
@@ -1150,36 +1256,36 @@ static bool parse_win_config(win_T *wp, Dict(win_config) *config, WinConfig *fco
   } else if (!config->external) {
     if (HAS_KEY_X(config, vertical) || HAS_KEY_X(config, split)) {
       is_split = true;
+      fconfig->external = false;
     } else if (wp == NULL) {  // new win
-      api_set_error(err, kErrorTypeValidation,
-                    "Must specify 'relative' or 'external' when creating a float");
-      goto fail;
+      VALIDATE_R(false, "'relative' or 'external' when creating a float", {
+        goto fail;
+      });
     }
   }
 
-  if (HAS_KEY_X(config, vertical)) {
-    if (!is_split) {
-      api_set_error(err, kErrorTypeValidation, "floating windows cannot have 'vertical'");
-      goto fail;
-    }
-  }
+  VALIDATE_CON(!(HAS_KEY_X(config, vertical) && !is_split), "vertical", "floating windows", {
+    goto fail;
+  });
+
+  VALIDATE_CON(!(HAS_KEY_X(config, split) && !is_split), "split", "floating windows", {
+    goto fail;
+  });
 
   if (HAS_KEY_X(config, split)) {
-    if (!is_split) {
-      api_set_error(err, kErrorTypeValidation, "floating windows cannot have 'split'");
+    VALIDATE_CON(is_split, "split", "floating windows", {
       goto fail;
-    }
-    if (!parse_config_split(config->split, &fconfig->split)) {
-      api_set_error(err, kErrorTypeValidation, "Invalid value of 'split' key");
+    });
+    VALIDATE_S(parse_config_split(config->split, &fconfig->split), "split", config->split.data, {
       goto fail;
-    }
+    });
   }
 
   if (HAS_KEY_X(config, anchor)) {
-    if (!parse_float_anchor(config->anchor, &fconfig->anchor)) {
-      api_set_error(err, kErrorTypeValidation, "Invalid value of 'anchor' key");
+    VALIDATE_S(parse_float_anchor(config->anchor, &fconfig->anchor),
+               "anchor", config->anchor.data, {
       goto fail;
-    }
+    });
   }
 
   if (HAS_KEY_X(config, row)) {
@@ -1203,10 +1309,10 @@ static bool parse_win_config(win_T *wp, Dict(win_config) *config, WinConfig *fco
       generate_api_error(wp, "bufpos", err);
       goto fail;
     } else {
-      if (!parse_float_bufpos(config->bufpos, &fconfig->bufpos)) {
-        api_set_error(err, kErrorTypeValidation, "Invalid value of 'bufpos' key");
+      VALIDATE_EXP(parse_float_bufpos(config->bufpos, &fconfig->bufpos),
+                   "bufpos", "[row, col] array", NULL, {
         goto fail;
-      }
+      });
 
       if (!HAS_KEY_X(config, row)) {
         fconfig->row = (fconfig->anchor & kFloatAnchorSouth) ? 0 : 1;
@@ -1218,69 +1324,67 @@ static bool parse_win_config(win_T *wp, Dict(win_config) *config, WinConfig *fco
   }
 
   if (HAS_KEY_X(config, width)) {
-    if (config->width > 0) {
-      fconfig->width = (int)config->width;
-    } else {
-      api_set_error(err, kErrorTypeValidation, "'width' key must be a positive Integer");
+    VALIDATE_EXP((config->width > 0), "width", "positive Integer", NULL, {
       goto fail;
-    }
+    });
+    fconfig->width = (int)config->width;
   } else if (!reconf && !is_split) {
-    api_set_error(err, kErrorTypeValidation, "Must specify 'width'");
-    goto fail;
+    VALIDATE_R(false, "width", {
+      goto fail;
+    });
   }
 
   if (HAS_KEY_X(config, height)) {
-    if (config->height > 0) {
-      fconfig->height = (int)config->height;
-    } else {
-      api_set_error(err, kErrorTypeValidation, "'height' key must be a positive Integer");
+    VALIDATE_EXP((config->height > 0), "height", "positive Integer", NULL, {
       goto fail;
-    }
+    });
+    fconfig->height = (int)config->height;
   } else if (!reconf && !is_split) {
-    api_set_error(err, kErrorTypeValidation, "Must specify 'height'");
-    goto fail;
-  }
-
-  if (relative_is_win || is_split) {
-    if (reconf && relative_is_win) {
-      win_T *target_win = find_window_by_handle(config->win, err);
-      if (!target_win) {
-        goto fail;
-      }
-
-      if (target_win == wp) {
-        api_set_error(err, kErrorTypeException, "floating window cannot be relative to itself");
-        goto fail;
-      }
-    }
-    fconfig->window = curwin->handle;
-    if (HAS_KEY_X(config, win)) {
-      if (config->win > 0) {
-        fconfig->window = config->win;
-      }
-    }
-  } else if (HAS_KEY_X(config, win)) {
-    if (has_relative) {
-      api_set_error(err, kErrorTypeValidation,
-                    "'win' key is only valid with relative='win' and relative=''");
+    VALIDATE_R(false, "height", {
       goto fail;
-    } else if (!is_split) {
-      api_set_error(err, kErrorTypeValidation,
-                    "non-float with 'win' requires at least 'split' or 'vertical'");
-      goto fail;
-    }
+    });
   }
 
   if (HAS_KEY_X(config, external)) {
     fconfig->external = config->external;
-    if (has_relative && fconfig->external) {
-      api_set_error(err, kErrorTypeValidation,
-                    "Only one of 'relative' and 'external' must be used");
+    VALIDATE_CON(!(has_relative && fconfig->external), "relative", "external", {
       goto fail;
-    }
+    });
     if (fconfig->external && !ui_has(kUIMultigrid)) {
       api_set_error(err, kErrorTypeValidation, "UI doesn't support external windows");
       goto fail;
+    }
+  }
+
+  VALIDATE_CON(!(HAS_KEY_X(config, win) && fconfig->external), "win", "external window", {
+    goto fail;
+  });
+
+  if (relative_is_win || (HAS_KEY_X(config, win) && !is_split && wp && wp->w_floating
+                          && fconfig->relative == kFloatRelativeWindow)) {
+    // When relative=win is given, missing win field means win=0.
+    win_T *target_win = find_window_by_handle(config->win, err);
+    if (!target_win) {
+      goto fail;
+    }
+    if (target_win == wp) {
+      api_set_error(err, kErrorTypeException, "floating window cannot be relative to itself");
+      goto fail;
+    }
+    fconfig->window = target_win->handle;
+  } else {
+    // Handle is not validated here, as win_config_split can accept negative values.
+    if (HAS_KEY_X(config, win)) {
+      VALIDATE_R(!(!is_split && !has_relative && (!wp || !wp->w_floating)),
+                 "non-float with 'win' requires 'split' or 'vertical'", {
+        goto fail;
+      });
+
+      fconfig->window = config->win;
+    }
+    // Resolve, but skip validating. E.g: win_config_split accepts negative "win".
+    if (fconfig->window == 0) {
+      fconfig->window = curwin->handle;
     }
   }
 
@@ -1294,23 +1398,19 @@ static bool parse_win_config(win_T *wp, Dict(win_config) *config, WinConfig *fco
   }
 
   if (HAS_KEY_X(config, zindex)) {
-    if (is_split) {
-      api_set_error(err, kErrorTypeValidation, "non-float cannot have 'zindex'");
+    VALIDATE_CON(will_float, "zindex", "non-float window", {
       goto fail;
-    }
-    if (config->zindex > 0) {
-      fconfig->zindex = (int)config->zindex;
-    } else {
-      api_set_error(err, kErrorTypeValidation, "'zindex' key must be a positive Integer");
+    });
+    VALIDATE_EXP((config->zindex > 0), "zindex", "positive Integer", NULL, {
       goto fail;
-    }
+    });
+    fconfig->zindex = (int)config->zindex;
   }
 
   if (HAS_KEY_X(config, title)) {
-    if (is_split) {
-      api_set_error(err, kErrorTypeValidation, "non-float cannot have 'title'");
+    VALIDATE_CON(will_float, "title", "non-float window", {
       goto fail;
-    }
+    });
 
     parse_bordertext(config->title, kBorderTextTitle, fconfig, err);
     if (ERROR_SET(err)) {
@@ -1322,17 +1422,15 @@ static bool parse_win_config(win_T *wp, Dict(win_config) *config, WinConfig *fco
       goto fail;
     }
   } else {
-    if (HAS_KEY_X(config, title_pos)) {
-      api_set_error(err, kErrorTypeException, "title_pos requires title to be set");
+    VALIDATE_R(!HAS_KEY_X(config, title_pos), "'title' requires 'title_pos'", {
       goto fail;
-    }
+    });
   }
 
   if (HAS_KEY_X(config, footer)) {
-    if (is_split) {
-      api_set_error(err, kErrorTypeValidation, "non-float cannot have 'footer'");
+    VALIDATE_CON(will_float, "footer", "non-float window", {
       goto fail;
-    }
+    });
 
     parse_bordertext(config->footer, kBorderTextFooter, fconfig, err);
     if (ERROR_SET(err)) {
@@ -1344,18 +1442,16 @@ static bool parse_win_config(win_T *wp, Dict(win_config) *config, WinConfig *fco
       goto fail;
     }
   } else {
-    if (HAS_KEY_X(config, footer_pos)) {
-      api_set_error(err, kErrorTypeException, "footer_pos requires footer to be set");
+    VALIDATE_R(!HAS_KEY_X(config, footer_pos), "'footer' requires 'footer_pos'", {
       goto fail;
-    }
+    });
   }
 
   Object border_style = OBJECT_INIT;
   if (HAS_KEY_X(config, border)) {
-    if (is_split) {
-      api_set_error(err, kErrorTypeValidation, "non-float cannot have 'border'");
+    VALIDATE_CON(will_float, "border", "non-float window", {
       goto fail;
-    }
+    });
     border_style = config->border;
     if (border_style.type != kObjectTypeNil) {
       parse_border_style(border_style, fconfig, err);
@@ -1374,14 +1470,15 @@ static bool parse_win_config(win_T *wp, Dict(win_config) *config, WinConfig *fco
     } else if (striequal(config->style.data, "minimal")) {
       fconfig->style = kWinStyleMinimal;
     } else {
-      api_set_error(err, kErrorTypeValidation, "Invalid value of 'style' key");
-      goto fail;
+      VALIDATE_S(false, "style", config->style.data, {
+        goto fail;
+      });
     }
   }
 
   if (HAS_KEY_X(config, noautocmd)) {
-    if (wp) {
-      api_set_error(err, kErrorTypeValidation, "'noautocmd' cannot be used with existing windows");
+    if (wp && config->noautocmd != fconfig->noautocmd) {
+      api_set_error(err, kErrorTypeValidation, "'noautocmd' cannot be changed on existing window");
       goto fail;
     }
     fconfig->noautocmd = config->noautocmd;
@@ -1392,6 +1489,12 @@ static bool parse_win_config(win_T *wp, Dict(win_config) *config, WinConfig *fco
   }
 
   if (HAS_KEY_X(config, hide)) {
+    VALIDATE_CON(will_float || !config->hide, "hide", "non-float window", {
+      goto fail;
+    });
+    if (fconfig->hide && !config->hide) {
+      redraw_later(wp, UPD_NOT_VALID);
+    }
     fconfig->hide = config->hide;
   }
 
@@ -1404,5 +1507,4 @@ static bool parse_win_config(win_T *wp, Dict(win_config) *config, WinConfig *fco
 fail:
   merge_win_config(fconfig, wp != NULL ? wp->w_config : WIN_CONFIG_INIT);
   return false;
-#undef HAS_KEY_X
 }

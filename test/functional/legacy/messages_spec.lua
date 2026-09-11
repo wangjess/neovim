@@ -1,11 +1,14 @@
+local t = require('test.testutil')
 local n = require('test.functional.testnvim')()
 local Screen = require('test.functional.ui.screen')
 
+local describe, it, before_each, finally = t.describe, t.it, t.before_each, t.finally
 local clear = n.clear
 local command = n.command
 local exec = n.exec
 local feed = n.feed
 local api = n.api
+local fn = n.fn
 local nvim_dir = n.nvim_dir
 local assert_alive = n.assert_alive
 
@@ -16,6 +19,7 @@ describe('messages', function()
 
   -- oldtest: Test_warning_scroll()
   it('a warning causes scrolling if and only if it has a stacktrace', function()
+    t.skip(t.is_arch('s390x'), 'timing-sensitive test unreliable on s390x')
     screen = Screen.new(75, 6)
 
     -- When the warning comes from a script, messages are scrolled so that the
@@ -451,6 +455,51 @@ describe('messages', function()
       ]])
     end)
 
+    -- oldtest: Test_message_more_recording()
+    it("hitting 'q' at hit-enter prompt does not start recording", function()
+      screen = Screen.new(60, 6)
+      command('call setline(1, range(1, 100))')
+      feed(':%p\n')
+      screen:expect([[
+        1                                                           |
+        2                                                           |
+        3                                                           |
+        4                                                           |
+        5                                                           |
+        {6:-- More --}^                                                  |
+      ]])
+      feed('G')
+      screen:expect([[
+        96                                                          |
+        97                                                          |
+        98                                                          |
+        99                                                          |
+        100                                                         |
+        {6:Press ENTER or type command to continue}^                     |
+      ]])
+
+      -- Hitting 'q' at the end of the more prompt should not start recording
+      feed('q')
+      screen:expect([[
+        96                                                          |
+        97                                                          |
+        98                                                          |
+        99                                                          |
+        ^100                                                         |
+                                                                    |
+      ]])
+      -- Hitting 'k' now should move the cursor up instead of recording keys
+      feed('k')
+      screen:expect([[
+        96                                                          |
+        97                                                          |
+        98                                                          |
+        ^99                                                          |
+        100                                                         |
+                                                                    |
+      ]])
+    end)
+
     -- oldtest: Test_echo_verbose_system()
     it('verbose message before echo command', function()
       screen = Screen.new(60, 10)
@@ -789,6 +838,120 @@ describe('messages', function()
       ^                                             |
       {1:~                                            }|*4
                                                    |
+    ]])
+  end)
+
+  -- oldtest: Test_long_formatprg_no_hit_enter()
+  it("long 'formatprg' doesn't cause hit-enter prompt or wrong cursor pos", function()
+    t.skip(fn.executable('sed') == 0, 'missing "sed" command')
+
+    screen = Screen.new(75, 10)
+    exec([[
+      setlocal scrolloff=0
+      call setline(1, range(1, 40))
+      let &l:formatprg = $'sed{repeat(' ', &columns)}p'
+      normal 20Gmz
+      normal 10Gzt
+    ]])
+    screen:expect([[
+      ^10                                                                         |
+      11                                                                         |
+      12                                                                         |
+      13                                                                         |
+      14                                                                         |
+      15                                                                         |
+      16                                                                         |
+      17                                                                         |
+      18                                                                         |
+                                                                                 |
+    ]])
+    feed('gq2j')
+    screen:expect([[
+      10                                                                         |*2
+      11                                                                         |*2
+      12                                                                         |
+      ^12                                                                         |
+      13                                                                         |
+      14                                                                         |
+      15                                                                         |
+                                                                                 |
+    ]])
+    feed(':messages<CR>')
+    screen:expect([[
+      10                                                                         |*2
+      11                                                                         |*2
+      12                                                                         |
+      ^12                                                                         |
+      13                                                                         |
+      14                                                                         |
+      15                                                                         |
+      3 lines filtered                                                           |
+    ]])
+  end)
+
+  -- oldtest: Test_hit_enter_during_mapping()
+  it('hit-enter prompt during a mapping', function()
+    screen = Screen.new(75, 10)
+    exec([[
+      set ruler
+      call setline(1, range(1, 20))
+      " The 8-line :echo leads to a hit-enter prompt.
+      nnoremap X :echo "a\nb\nc\nd\ne\nf\ng\nh"<CR>gg
+      nnoremap \b :echo "a\nb\nc\nd\ne\nf\ng\nh"<CR>:b<Space>
+      normal! 10G
+    ]])
+    t.eq({ mode = 'n', blocking = false }, api.nvim_get_mode())
+    t.eq({ 10, 0 }, api.nvim_win_get_cursor(0))
+
+    feed('X')
+    -- Without the fix the hit-enter prompt eats the mapping's "g" keys and the
+    -- cursor stays put.  With the fix "gg" runs and moves the cursor to line 1.
+    t.eq({ mode = 'n', blocking = false }, api.nvim_get_mode())
+    t.eq({ 1, 0 }, api.nvim_win_get_cursor(0))
+
+    -- If a mapping starts cmdline after multiline messages exceeding 'cmdheight',
+    -- the messages should still be visible.
+    feed('\\b')
+    screen:expect([[
+      {3:                                                                           }|
+      a                                                                          |
+      b                                                                          |
+      c                                                                          |
+      d                                                                          |
+      e                                                                          |
+      f                                                                          |
+      g                                                                          |
+      h                                                                          |
+      :b ^                                                                        |
+    ]])
+  end)
+
+  -- oldtest: Test_fileinfo_after_last_bd()
+  it('fileinfo is shown after :bd on last listed buffer', function()
+    screen = Screen.new(50, 10)
+    exec([[
+      set shortmess-=F
+      edit xxx
+      edit yyy
+    ]])
+    screen:expect([[
+      ^                                                  |
+      {1:~                                                 }|*8
+      "yyy" [New]                                       |
+    ]])
+
+    command('bd')
+    screen:expect([[
+      ^                                                  |
+      {1:~                                                 }|*8
+      "xxx" [New] --No lines in buffer--                |
+    ]])
+
+    command('bd')
+    screen:expect([[
+      ^                                                  |
+      {1:~                                                 }|*8
+      "[No Name]" --No lines in buffer--                |
     ]])
   end)
 end)

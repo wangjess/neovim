@@ -253,6 +253,24 @@ func Test_diffget_diffput()
   %bwipe!
 endfunc
 
+" Undo after getting lines into an empty buffer must leave it empty again
+func Test_diffget_undo_empty_buffer()
+  enew!
+  diffthis
+  new
+  call setline(1, ['1', '2'])
+  diffthis
+
+  wincmd p
+  normal do
+  call assert_equal(['1', '2'], getline(1, '$'))
+  undo
+  call assert_equal([''], getline(1, '$'))
+
+  windo diffoff
+  %bwipe!
+endfunc
+
 " Test putting two changes from one buffer to another
 func Test_diffput_two()
   new a
@@ -951,6 +969,8 @@ endfunc
 
 " Verify a screendump with both the internal and external diff.
 func VerifyBoth(buf, dumpfile, extra)
+  CheckScreendump
+
   " trailing : for leaving the cursor on the command line
   for cmd in [":set diffopt=filler" . a:extra . "\<CR>:", ":set diffopt+=internal\<CR>:"]
     call term_sendkeys(a:buf, cmd)
@@ -970,6 +990,8 @@ endfunc
 
 " Verify a screendump with the internal diff only.
 func VerifyInternal(buf, dumpfile, extra)
+  CheckScreendump
+
   call term_sendkeys(a:buf, ":diffupdate!\<CR>")
   " trailing : for leaving the cursor on the command line
   call term_sendkeys(a:buf, ":set diffopt=internal,filler" . a:extra . "\<CR>:")
@@ -3309,6 +3331,89 @@ func Test_diff_add_prop_in_autocmd()
   call VerifyScreenDump(buf, 'Test_diff_add_prop_in_autocmd_01', {})
 
   call StopVimInTerminal(buf)
+endfunc
+
+" this was causing a use-after-free by calling winframe_remove() recursively
+func Test_diffexpr_wipe_buffers()
+  CheckRunVimInTerminal
+
+  let lines =<< trim END
+    def DiffFuncExpr()
+      var in: list<string> = readfile(v:fname_in)
+      var new = readfile(v:fname_new)
+      var out: string = diff(in, new)
+      writefile(split(out, "n"), v:fname_out)
+    enddef
+
+    new
+    vnew
+    set diffexpr=DiffFuncExpr()
+    wincmd l
+    new
+    cal setline(1,range(20))
+    wind difft
+    wincm w
+    hid
+    %bw!
+  END
+  call writefile(lines, 'Xtest_diffexpr_wipe', 'D')
+
+  let buf = RunVimInTerminal('Xtest_diffexpr_wipe', {})
+  call term_sendkeys(buf, ":so\<CR>")
+  call WaitForAssert({-> assert_match('4 buffers wiped out', term_getline(buf, 20))})
+
+  call StopVimInTerminal(buf)
+endfunc
+
+func Test_diffput_to_empty_buf()
+  CheckScreendump
+
+  let lines =<< trim END
+    call setline(1, ['foo', 'bar', 'baz'])
+    rightbelow vnew
+    windo diffthis
+    windo set cursorline nofoldenable
+    wincmd t
+  END
+  call writefile(lines, 'Xtest_diffput_to_empty_buf', 'D')
+
+  let buf = RunVimInTerminal('-S Xtest_diffput_to_empty_buf', {})
+  call VerifyScreenDump(buf, 'Test_diffput_to_empty_buf_01', {})
+  call term_sendkeys(buf, '0')  " Trigger an initial 'cursorbind' check.
+  call VerifyScreenDump(buf, 'Test_diffput_to_empty_buf_01', {})
+  call term_sendkeys(buf, ":diffput | echo\<CR>")
+  call VerifyScreenDump(buf, 'Test_diffput_to_empty_buf_02', {})
+  call term_sendkeys(buf, ":redraw!\<CR>")
+  call VerifyScreenDump(buf, 'Test_diffput_to_empty_buf_02', {})
+  call term_sendkeys(buf, 'j')
+  call VerifyScreenDump(buf, 'Test_diffput_to_empty_buf_03', {})
+
+  call StopVimInTerminal(buf)
+endfunc
+
+" Undo can change which lines correspond in a diff. 'cursorbind' must update
+" the other window even when the cursor here did not move.
+func Test_diff_cursorbind_after_undo()
+  call setline(1, ['x', 'y', 'c', 'd'])
+  let w1 = win_getid()
+  new
+  call setline(1, ['p', 'q', 'c', 'd'])
+  let w2 = win_getid()
+  windo diffthis
+  call win_gotoid(w1)
+
+  normal! 2dd
+  call assert_equal(1, line('.', w1))
+  call assert_equal(1, line('.', w2))
+  normal! jk
+  call assert_equal(1, line('.', w1))
+  call assert_equal(3, line('.', w2))
+
+  normal! u
+  call assert_equal(1, line('.', w1))
+  call assert_equal(1, line('.', w2))
+
+  %bw!
 endfunc
 
 " vim: shiftwidth=2 sts=2 expandtab

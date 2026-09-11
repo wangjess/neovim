@@ -1,10 +1,53 @@
 local bit = require('bit')
 local glob = vim.glob
 local watch = vim._watch
+local log = require('vim.lsp.log')
+local notify = require('vim._core.util').notify
 local protocol = require('vim.lsp.protocol')
 local lpeg = vim.lpeg
 
 local M = {}
+
+-- Use a bounded set to suppress repeat warnings without unbounded growth.
+---@type table<string, true>
+local logged_invalid_patterns = {}
+---@type string[]
+local logged_invalid_pattern_keys = {}
+local logged_invalid_pattern_key_index = 1
+
+---@param key string
+local function remember_invalid_pattern(key)
+  local old_key = logged_invalid_pattern_keys[logged_invalid_pattern_key_index]
+  if old_key then
+    logged_invalid_patterns[old_key] = nil
+  end
+  logged_invalid_patterns[key] = true
+  logged_invalid_pattern_keys[logged_invalid_pattern_key_index] = key
+  logged_invalid_pattern_key_index = logged_invalid_pattern_key_index % 20 + 1
+end
+
+--- Parses a glob pattern and logs invalid patterns once.
+---@param pattern string
+---@param client vim.lsp.Client
+---@return vim.lpeg.Pattern?
+local function glob_to_lpeg(pattern, client)
+  local ok, pattern_or_err = pcall(glob.to_lpeg, pattern)
+  if ok then
+    return pattern_or_err
+  end
+  local key = string.format('%d:%s', client.id, pattern)
+  if not logged_invalid_patterns[key] then
+    log.error(
+      string.format(
+        'LSP[%s] skipping invalid workspace/didChangeWatchedFiles globPattern',
+        client.name
+      ),
+      pattern,
+      pattern_or_err
+    )
+    remember_invalid_pattern(key)
+  end
+end
 
 if vim.fn.has('win32') == 1 or vim.fn.has('mac') == 1 then
   M._watchfunc = watch.watch
@@ -62,24 +105,22 @@ function M.register(reg, client_id)
     local glob_pattern = w.globPattern
 
     if type(glob_pattern) == 'string' then
-      local pattern = glob.to_lpeg(glob_pattern)
-      if not pattern then
-        error('Cannot parse pattern: ' .. glob_pattern)
-      end
-      for _, folder in ipairs(client.workspace_folders) do
-        local base_dir = vim.uri_to_fname(folder.uri)
-        table.insert(watch_regs[base_dir], { pattern = pattern, kind = kind })
+      local pattern = glob_to_lpeg(glob_pattern, client)
+      if pattern then
+        for _, folder in ipairs(client.workspace_folders) do
+          local base_dir = vim.uri_to_fname(folder.uri)
+          table.insert(watch_regs[base_dir], { pattern = pattern, kind = kind })
+        end
       end
     else
       local base_uri = glob_pattern.baseUri
       local uri = type(base_uri) == 'string' and base_uri or base_uri.uri
       local base_dir = vim.uri_to_fname(uri)
-      local pattern = glob.to_lpeg(glob_pattern.pattern)
-      if not pattern then
-        error('Cannot parse pattern: ' .. glob_pattern.pattern)
+      local pattern = glob_to_lpeg(glob_pattern.pattern, client)
+      if pattern then
+        local relative_pattern = lpeg.P(base_dir .. '/') * pattern --[[@as vim.lpeg.Pattern]]
+        table.insert(watch_regs[base_dir], { pattern = relative_pattern, kind = kind })
       end
-      pattern = lpeg.P(base_dir .. '/') * pattern
-      table.insert(watch_regs[base_dir], { pattern = pattern, kind = kind })
     end
   end
 
@@ -145,6 +186,20 @@ function M.register(reg, client_id)
         -- match a *particular* pattern+kind pair.
         include_pattern = include_pattern,
         exclude_pattern = M._poll_exclude_pattern,
+        on_error = function(err)
+          local name = string.format('LSP[%s]', client.name)
+          local message = string.format('file watcher failed for %s', base_dir)
+          local level = vim.log.levels.ERROR
+          -- Servers may register a nonexistent baseUri. Keep this informational
+          -- and continue registering the other watchers.
+          if err:match('^ENOENT:') then
+            level = vim.log.levels.INFO
+            log.info(name, message, err)
+          else
+            log.error(name, message, err)
+          end
+          notify(name, message .. ': ' .. err, level, true)
+        end,
       }, callback(base_dir))
     )
   end

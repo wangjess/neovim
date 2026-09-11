@@ -1,6 +1,7 @@
 local t = require('test.testutil')
 local n = require('test.functional.testnvim')()
 
+local describe, it, before_each = t.describe, t.it, t.before_each
 local call = n.call
 local clear = n.clear
 local command = n.command
@@ -77,5 +78,16 @@ describe('wait()', function()
     eq('Vim:E475: Invalid value for argument 3', pcall_err(call, 'wait', 0, 1, -1))
     eq('Vim:E475: Invalid value for argument 3', pcall_err(call, 'wait', 0, 1, 0))
     eq('Vim:E475: Invalid value for argument 3', pcall_err(call, 'wait', 0, 1, ''))
+  end)
+
+  it('does not leak when Nvim exits while waiting', function()
+    n.expect_exit(
+      500,
+      source,
+      [[
+        call timer_start(10, {-> execute('qall!')})
+        call wait(10000, 0)
+      ]]
+    )
   end)
 end)

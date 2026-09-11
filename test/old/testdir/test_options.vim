@@ -108,9 +108,9 @@ func Test_options_command()
 
   " Check if the option-window is opened horizontally.
   wincmd j
-  call assert_notequal('option-window', bufname(''))
+  call assert_notequal('nvim-optwin://optwin', bufname(''))
   wincmd k
-  call assert_equal('option-window', bufname(''))
+  call assert_equal('nvim-optwin://optwin', bufname(''))
   " close option-window
   close
 
@@ -118,9 +118,9 @@ func Test_options_command()
   vert options
   " Check if the option-window is opened vertically.
   wincmd l
-  call assert_notequal('option-window', bufname(''))
+  call assert_notequal('nvim-optwin://optwin', bufname(''))
   wincmd h
-  call assert_equal('option-window', bufname(''))
+  call assert_equal('nvim-optwin://optwin', bufname(''))
   " close option-window
   close
 
@@ -141,16 +141,16 @@ func Test_options_command()
   tab options
   " Check if the option-window is opened in a tab.
   normal gT
-  call assert_notequal('option-window', bufname(''))
+  call assert_notequal('nvim-optwin://optwin', bufname(''))
   normal gt
-  call assert_equal('option-window', bufname(''))
+  call assert_equal('nvim-optwin://optwin', bufname(''))
   " close option-window
   close
 
   " Open the options window browse
   if has('browse')
     browse set
-    call assert_equal('option-window', bufname(''))
+    call assert_equal('nvim-optwin://optwin', bufname(''))
     close
   endif
 endfunc
@@ -542,8 +542,8 @@ func Test_set_completion_string_values()
     call assert_match('unnamed', getcompletion('set clipboard=', 'cmdline')[0])
   endif
   call assert_equal('.', getcompletion('set complete=', 'cmdline')[1])
-  call assert_equal('menu', getcompletion('set completeopt=', 'cmdline')[1])
-  call assert_equal('keyword', getcompletion('set completefuzzycollect=', 'cmdline')[0])
+  call assert_equal('fuzzy', getcompletion('set completeopt=', 'cmdline')[1])
+  " call assert_equal('keyword', getcompletion('set completefuzzycollect=', 'cmdline')[0])
   if exists('+completeslash')
     call assert_equal('backslash', getcompletion('set completeslash=', 'cmdline')[1])
   endif
@@ -628,7 +628,9 @@ func Test_set_completion_string_values()
 
   call assert_equal('eol', getcompletion('set listchars+=', 'cmdline')[0])
   call assert_equal(['multispace', 'leadmultispace'], getcompletion('set listchars+=', 'cmdline')[-2:])
+  call assert_equal(['tab', 'leadtab'], getcompletion('set listchars+=', 'cmdline')[5:6])
   call assert_equal('eol', getcompletion('setl listchars+=', 'cmdline')[0])
+  call assert_equal(['tab', 'leadtab'], getcompletion('setl listchars+=', 'cmdline')[5:6])
   call assert_equal(['multispace', 'leadmultispace'], getcompletion('setl listchars+=', 'cmdline')[-2:])
   call assert_equal('stl', getcompletion('set fillchars+=', 'cmdline')[0])
   call assert_equal('stl', getcompletion('setl fillchars+=', 'cmdline')[0])
@@ -680,7 +682,7 @@ func Test_set_completion_string_values()
   " call assert_equal("\"set hl=8bi i", @:)
 
   " messagesopt
-  call assert_equal(['history:', 'hit-enter', 'wait:'],
+  call assert_equal(['history:', 'hit-enter', 'maxheight:', 'pager:', 'progress:', 'timeout:', 'wait:'],
         \ getcompletion('set messagesopt+=', 'cmdline')->sort())
 
   "
@@ -861,12 +863,9 @@ func Test_set_option_errors()
   call assert_fails('set commentstring=x', 'E537:')
   call assert_fails('let &commentstring = "x"', 'E537:')
   call assert_fails('set complete=x', 'E539:')
-  call assert_fails('set rulerformat=%-', 'E539:')
-  call assert_fails('set rulerformat=%(', 'E542:')
-  call assert_fails('set rulerformat=%15(%%', 'E542:')
 
   " Test for 'statusline' errors
-  call assert_fails('set statusline=%$', 'E539:')
+  call assert_fails('set statusline=%^', 'E539:')  " Nvim: supports %$
   call assert_fails('set statusline=%{', 'E540:')
   call assert_fails('set statusline=%{%', 'E540:')
   call assert_fails('set statusline=%{%}', 'E539:')
@@ -874,12 +873,17 @@ func Test_set_option_errors()
   call assert_fails('set statusline=%)', 'E542:')
 
   " Test for 'tabline' errors
-  call assert_fails('set tabline=%$', 'E539:')
+  call assert_fails('set tabline=%^', 'E539:')  " Nvim: supports %$
   call assert_fails('set tabline=%{', 'E540:')
   call assert_fails('set tabline=%{%', 'E540:')
   call assert_fails('set tabline=%{%}', 'E539:')
   call assert_fails('set tabline=%(', 'E542:')
   call assert_fails('set tabline=%)', 'E542:')
+
+  " Test for 'rulerformat' errors
+  call assert_fails('set rulerformat=%-', 'E539:')
+  call assert_fails('set rulerformat=%(', 'E542:')
+  call assert_fails('set rulerformat=%15(%%', 'E542:')
 
   if has('cursorshape')
     " This invalid value for 'guicursor' used to cause Vim to crash.
@@ -968,6 +972,32 @@ func Test_set_option_errors()
   call assert_fails('call setwinvar(0, "&nosuchoption", 0)', ['E355:', 'E355:'])
   call assert_fails('call setwinvar(0, "&nosuchoption", "")', ['E355:', 'E355:'])
   call assert_fails('call setwinvar(0, "&nosuchoption", [])', ['E355:', 'E355:'])
+endfunc
+
+func Test_set_encoding()
+  throw 'skipped: Nvim supports ''utf8'' encoding only'
+  let save_encoding = &encoding
+
+  set enc=iso8859-1
+  call assert_equal('latin1', &enc)
+  set enc=iso8859_1
+  call assert_equal('latin1', &enc)
+  set enc=iso-8859-1
+  call assert_equal('latin1', &enc)
+  set enc=iso_8859_1
+  call assert_equal('latin1', &enc)
+  set enc=iso88591
+  call assert_equal('latin1', &enc)
+  set enc=iso8859
+  call assert_equal('latin1', &enc)
+  set enc=iso-8859
+  call assert_equal('latin1', &enc)
+  set enc=iso_8859
+  call assert_equal('latin1', &enc)
+  call assert_fails('set enc=iso8858', 'E474:')
+  call assert_equal('latin1', &enc)
+
+  let &encoding = save_encoding
 endfunc
 
 func CheckWasSet(name)
@@ -1151,9 +1181,9 @@ func Test_backupskip()
       call writefile(['errors:'] + v:errors, 'Xtestout')
       qall
   [CODE]
-  call writefile(after, 'Xafter')
-  " let cmd = GetVimProg() . ' --not-a-term -S Xafter --cmd "set enc=utf8"'
-  let cmd = GetVimProg() . ' -S Xafter --cmd "set enc=utf8"'
+  call writefile(after, 'Xafter', 'D')
+  " let cmd = GetVimProg() . ' --clean --not-a-term -S Xafter --cmd "set enc=utf8"'
+  let cmd = GetVimProg() . ' --clean -S Xafter --cmd "set enc=utf8"'
 
   let saveenv = {}
   for var in ['TMPDIR', 'TMP', 'TEMP']
@@ -1161,9 +1191,9 @@ func Test_backupskip()
     call setenv(var, '/duplicate/path')
   endfor
 
-  " unset $HOME, so that it won't try to read init files
+  " set $HOME='', so that Vim won't try to read init files
   let saveenv['HOME'] = getenv("HOME")
-  call setenv('HOME', v:null)
+  call setenv('HOME', '')
   exe 'silent !' . cmd
   call assert_equal(['errors:'], readfile('Xtestout'))
 
@@ -1173,7 +1203,6 @@ func Test_backupskip()
   endfor
 
   call delete('Xtestout')
-  call delete('Xafter')
 
   " Duplicates should be filtered out (option has P_NODUP)
   let backupskip = &backupskip
@@ -1397,7 +1426,7 @@ func Test_shortmess_F3()
   if has('nanotime')
     sleep 10m
   else
-    sleep 2
+    sleep 3
   endif
   call writefile(['bar'], 'X_dummy')
   bprev
@@ -1407,7 +1436,7 @@ func Test_shortmess_F3()
   if has('nanotime')
     sleep 10m
   else
-    sleep 2
+    sleep 3
   endif
   call writefile(['baz'], 'X_dummy')
   checktime
@@ -1464,6 +1493,46 @@ func Test_local_scrolloff()
   close
   set so&
   set siso&
+endfunc
+
+func Test_local_scrolloffpad()
+  let save_g_sop = &g:sop
+  let save_l_sop = &l:sop
+  set sop=0
+  call assert_equal(0, &g:sop)
+  call assert_equal(-1, &l:sop)
+  call assert_equal(0, &sop)
+  setglobal sop=1
+  call assert_equal(1, &g:sop)
+  call assert_equal(1, &sop)
+  split
+  call assert_equal(1, &g:sop)
+  call assert_equal(-1, &l:sop)
+  call assert_equal(1, &sop)
+  setlocal sop=0
+  call assert_equal(0, &l:sop)
+  call assert_equal(0, &sop)
+  call assert_equal(1, &g:sop)
+  wincmd p
+  call assert_equal(1, &sop)
+  wincmd p
+  "setlocal sop<
+  set sop<
+  call assert_equal(-1, &l:sop)
+  call assert_equal(1, &sop)
+  setlocal sop=2
+  call assert_equal(2, &l:sop)
+  call assert_equal(2, &sop)
+  setlocal sop=-1
+  call assert_equal(-1, &l:sop)
+  call assert_equal(1, &sop)  " Uses global value because local is -1
+  call assert_fails("setlocal sop=-2", 'E474:')
+  call assert_equal(-1, &l:sop)
+  call assert_equal(1, &sop)
+  call assert_fails("setlocal sop=foo", 'E521:')
+  close
+  let &g:sop = save_g_sop
+  let &l:sop = save_l_sop
 endfunc
 
 func Test_writedelay()
@@ -1662,27 +1731,36 @@ endfunc
 
 " Test for setting boolean global-local option value
 func Test_set_boolean_global_local_option()
-  setglobal autoread
-  setlocal noautoread
+  CheckUnix
+
+  setglobal autoread fsync
+  setlocal noautoread nofsync
   call assert_equal(1, &g:autoread)
   call assert_equal(0, &l:autoread)
   call assert_equal(0, &autoread)
+  call assert_equal(1, &g:fsync)
+  call assert_equal(0, &l:fsync)
+  call assert_equal(0, &fsync)
 
   " :setlocal {option}< set the effective value of {option} to its global value.
-  "set autoread<
-  setlocal autoread<
+  "set autoread< fsync<
+  setlocal autoread< fsync<
   call assert_equal(1, &l:autoread)
   call assert_equal(1, &autoread)
+  call assert_equal(1, &l:fsync)
+  call assert_equal(1, &fsync)
 
   " :set {option}< removes the local value, so that the global value will be used.
-  setglobal noautoread
-  setlocal autoread
-  "setlocal autoread<
-  set autoread<
+  setglobal noautoread nofsync
+  setlocal autoread fsync
+  "setlocal autoread< fsync<
+  set autoread< fsync<
   call assert_equal(-1, &l:autoread)
   call assert_equal(0, &autoread)
+  call assert_equal(-1, &l:fsync)
+  call assert_equal(0, &fsync)
 
-  set autoread&
+  set autoread& fsync&
 endfunc
 
 func Test_set_in_sandbox()
@@ -2180,7 +2258,7 @@ func Test_opt_winminheight()
 endfunc
 
 func Test_opt_winminheight_term()
-  " See test/functional/legacy/options_spec.lua
+  " See test/functional/options/options_spec.lua
   CheckRunVimInTerminal
 
   " The tabline should be taken into account.
@@ -2201,7 +2279,7 @@ func Test_opt_winminheight_term()
 endfunc
 
 func Test_opt_winminheight_term_tabs()
-  " See test/functional/legacy/options_spec.lua
+  " See test/functional/options/options_spec.lua
   CheckRunVimInTerminal
 
   " The tabline should be taken into account.
@@ -2243,7 +2321,7 @@ endfunc
 
 " Test that resetting laststatus does change scroll option
 func Test_opt_reset_scroll()
-  " See test/functional/legacy/options_spec.lua
+  " See test/functional/options/options_spec.lua
   CheckRunVimInTerminal
   let vimrc =<< trim [CODE]
     set scroll=2
@@ -2383,6 +2461,13 @@ func Test_opt_scrolljump()
   call assert_equal({'lnum':11, 'leftcol':0, 'col':0, 'topfill':0,
          \            'topline':5, 'coladd':0, 'skipcol':0, 'curswant':0},
          \           winsaveview())
+
+  norm! 100Gzt
+  set scrolljump=-100
+  norm! 20k
+  call assert_equal({'lnum':80, 'leftcol':0, 'col':0, 'topfill':0,
+        \            'topline':71, 'coladd':0, 'skipcol':0, 'curswant':0},
+        \           winsaveview())
 
   set scrolljump&
   bw
@@ -2569,7 +2654,7 @@ func Test_string_option_revert_on_failure()
         \ ['nrformats', 'alpha', 'a123'],
         \ ['omnifunc', 'MyOmniFunc', '1a-'],
         \ ['operatorfunc', 'MyOpFunc', '1a-'],
-        "\ ['previewpopup', 'width:20', 'a123'],
+        \ ['previewpopup', 'width:20', 'a123'],
         "\ ['printoptions', 'paper:A4', 'a123:'],
         \ ['quickfixtextfunc', 'MyQfFunc', '1a-'],
         \ ['rulerformat', '%l', '%['],
@@ -2577,6 +2662,8 @@ func Test_string_option_revert_on_failure()
         \ ['selection', 'exclusive', 'a123'],
         \ ['selectmode', 'cmd', 'a123'],
         \ ['sessionoptions', 'options', 'a123'],
+        \ ['shellpipe', '>%s', "%s%s%s"],
+        \ ['shellredir', '>%s', "%s%s%s"],
         \ ['shortmess', 'w', '2'],
         \ ['showbreak', '>>', "\x01"],
         \ ['showcmdloc', 'statusline', 'a123'],
@@ -2913,6 +3000,265 @@ func Test_showcmd()
   set nocp
   call assert_equal(1, &showcmd)
   let &cp = _cp
+endfunc
+
+" Test that :set+= and :set-= handle "key:value" items in comma-separated
+" options by matching on the key part.
+func Test_comma_option_key_value()
+  " += replaces existing item with same key
+  set diffopt=internal,filler,algorithm:patience
+  set diffopt+=algorithm:histogram
+  call assert_equal('internal,filler,algorithm:histogram', &diffopt)
+
+  " += with exact duplicate does nothing
+  set diffopt=internal,filler,algorithm:patience
+  set diffopt+=algorithm:patience
+  call assert_equal('internal,filler,algorithm:patience', &diffopt)
+
+  " += with multiple items, each processed individually
+  set diffopt=algorithm:patience,filler
+  set diffopt+=algorithm:histogram,filler
+  call assert_equal('filler,algorithm:histogram', &diffopt)
+
+  " += with non-colon item appends normally
+  set diffopt=internal,filler
+  set diffopt+=iwhite
+  call assert_equal('internal,filler,iwhite', &diffopt)
+
+  " += repeated updates
+  set diffopt=internal,filler,algorithm:patience
+  set diffopt+=algorithm:histogram
+  set diffopt+=algorithm:minimal
+  set diffopt+=algorithm:myers
+  call assert_equal('internal,filler,algorithm:myers', &diffopt)
+
+  " += all exact duplicates does nothing
+  set diffopt=internal,filler,algorithm:patience
+  set diffopt+=algorithm:patience,filler
+  call assert_equal('internal,filler,algorithm:patience', &diffopt)
+
+  " -= with "key:" removes item regardless of value
+  set diffopt=internal,filler,algorithm:patience
+  set diffopt-=algorithm:
+  call assert_equal('internal,filler', &diffopt)
+
+  " -= with "key:value" also matches by key
+  set diffopt=internal,filler,algorithm:patience
+  set diffopt-=algorithm:histogram
+  call assert_equal('internal,filler', &diffopt)
+
+  " -= without colon does not match "key:value" items
+  set diffopt=internal,filler,algorithm:patience
+  set diffopt-=algorithm
+  call assert_equal('internal,filler,algorithm:patience', &diffopt)
+
+  " -= with multiple non-colon items (order independent)
+  set diffopt=internal,filler,closeoff
+  set diffopt-=filler,internal
+  call assert_equal('closeoff', &diffopt)
+
+  " -= with multiple non-colon items (same order as in option)
+  set diffopt=internal,filler,closeoff
+  set diffopt-=internal,filler
+  call assert_equal('closeoff', &diffopt)
+
+  " -= with multiple items: non-colon and colon mixed
+  set diffopt& diffopt=internal,filler,closeoff,indent-heuristic,inline:char
+  set diffopt-=indent-heuristic,inline:char
+  call assert_equal('internal,filler,closeoff', &diffopt)
+
+  " -= with multiple items: colon and non-colon mixed (reverse order)
+  set diffopt& diffopt=internal,filler,closeoff,indent-heuristic,inline:char
+  set diffopt-=inline:char,indent-heuristic
+  call assert_equal('internal,filler,closeoff', &diffopt)
+
+  " += with multiple non-colon items
+  set diffopt=internal,filler
+  set diffopt+=closeoff,iwhite
+  call assert_equal('internal,filler,closeoff,iwhite', &diffopt)
+
+  " += with multiple non-colon items, some already exist
+  set diffopt=internal,filler,closeoff
+  set diffopt+=filler,iwhite
+  call assert_equal('internal,filler,closeoff,iwhite', &diffopt)
+
+  " -= with multiple items including key match
+  set diffopt=internal,filler,algorithm:patience
+  set diffopt-=algorithm:,filler
+  call assert_equal('internal', &diffopt)
+
+  " -= key match when item is at the beginning
+  set diffopt=algorithm:patience,internal,filler
+  set diffopt-=algorithm:
+  call assert_equal('internal,filler', &diffopt)
+
+  " -= key match when item is at the end
+  set diffopt=internal,filler,algorithm:patience
+  set diffopt-=algorithm:
+  call assert_equal('internal,filler', &diffopt)
+
+  " -= key match when item is the only item
+  set diffopt=algorithm:patience
+  set diffopt-=algorithm:
+  call assert_equal('', &diffopt)
+
+  " ^= prepends new item
+  set diffopt=internal,filler
+  set diffopt^=algorithm:histogram
+  call assert_equal('algorithm:histogram,internal,filler', &diffopt)
+
+  " ^= replaces item and prepends
+  set diffopt=internal,filler,algorithm:patience
+  set diffopt^=algorithm:histogram
+  call assert_equal('algorithm:histogram,internal,filler', &diffopt)
+
+  " ^= with exact duplicate does nothing
+  set diffopt=internal,filler,algorithm:patience
+  set diffopt^=algorithm:patience
+  call assert_equal('internal,filler,algorithm:patience', &diffopt)
+
+  set diffopt&
+
+  " Multiple items with the same key (set via :let)
+  " += with different value removes all items with the same key
+  let &lcs = 'eol:$,multispace:yY,space:x,multispace:XY'
+  set lcs+=multispace:AB
+  call assert_equal('eol:$,space:x,multispace:AB', &lcs)
+
+  " += with exact duplicate keeps it and removes others with the same key
+  let &lcs = 'eol:$,multispace:XY,space:x,multispace:XY'
+  set lcs+=multispace:XY
+  call assert_equal('eol:$,multispace:XY,space:x', &lcs)
+
+  " -= removes all items with the same key
+  let &lcs = 'eol:$,multispace:yY,space:x,multispace:XY'
+  set lcs-=multispace:
+  call assert_equal('eol:$,space:x', &lcs)
+
+  " ^= with different value removes all items and prepends
+  let &lcs = 'eol:$,multispace:yY,space:x,multispace:XY'
+  set lcs^=multispace:AB
+  call assert_equal('multispace:AB,eol:$,space:x', &lcs)
+
+  set lcs&
+endfunc
+
+func Test_insecure_flag_copied_to_new_buffer_indentexpr()
+  let modeline = &modeline
+  let modelineexpr = &modelineexpr
+  "let modelinestrict = &modelinestrict
+
+  func! Xindentexprpwn(findstart, base)
+    if a:findstart
+      sandbox setglobal indentexpr=writefile(['leak'],\ 'Xindentexpr_proof')
+      return 0
+    endif
+    return []
+  endfunc
+
+  try
+    set modeline modelineexpr "nomodelinestrict
+
+    call writefile([
+          \ 'vim: set complete=FXindentexprpwn :',
+          \ 'body',
+          \ ], 'Xindentexpr_attack', 'D')
+    call delete('Xindentexpr_proof')
+    edit Xindentexpr_attack
+    call cursor(2, 1)
+    call feedkeys("i\<C-N>\<Esc>", 'xt')
+    bwipe!
+
+    " A brand new buffer now inherits the poisoned 'indentexpr' via
+    " buf_copy_options().  It must still be evaluated in the sandbox.
+    enew!
+    call setline(1, ['{', 'x', '}'])
+    normal! 2G==
+    call assert_false(filereadable('Xindentexpr_proof'))
+    bwipe!
+  finally
+    let &modeline = modeline
+    let &modelineexpr = modelineexpr
+    "let &modelinestrict = modelinestrict
+    set indentexpr&
+    call delete('Xindentexpr_proof')
+    delfunc Xindentexprpwn
+  endtry
+endfunc
+
+func Test_insecure_flag_not_cleared_by_other_buffer_complete()
+  let modeline = &modeline
+  let modelineexpr = &modelineexpr
+  "let modelinestrict = &modelinestrict
+
+  func! Xcompletepwn(findstart, base)
+    if a:findstart
+      call writefile(['leak'], 'Xcomplete_cross_proof')
+      return 0
+    endif
+    return ['match']
+  endfunc
+
+  try
+    set modeline modelineexpr "nomodelinestrict
+
+    call writefile([
+          \ 'vim: set complete=FXcompletepwn :',
+          \ 'body',
+          \ ], 'Xcomplete_cross_attack', 'D')
+    call delete('Xcomplete_cross_proof')
+    edit Xcomplete_cross_attack
+    let bufA = bufnr('%')
+
+    " An unrelated buffer does a completely ordinary, trusted reset.
+    new
+    setlocal complete=.,w,b,u,t
+    bwipe!
+
+    " Back in the modeline-tainted buffer: must still be sandboxed.
+    exe 'buffer ' .. bufA
+    call cursor(2, 1)
+    call assert_fails('call feedkeys("i\<C-N>\<Esc>", "xt")', 'E48:')
+    call assert_false(filereadable('Xcomplete_cross_proof'))
+    bwipe!
+  finally
+    let &modeline = modeline
+    let &modelineexpr = modelineexpr
+    "let &modelinestrict = modelinestrict
+    call delete('Xcomplete_cross_proof')
+    delfunc Xcompletepwn
+  endtry
+endfunc
+
+func Test_formatexpr_insecure_copied_to_new_buffer()
+  new
+  sandbox setglobal formatexpr=writefile(['leak'],\ 'Xleak_fex')
+  enew!
+  call setline(1, ['some text to format'])
+  set textwidth=10
+  silent! normal! gqq
+  call assert_false(filereadable('Xleak_fex'))
+  call delete('Xleak_fex')
+  set formatexpr& textwidth&
+  bwipe!
+endfunc
+
+" includeexpr: triggered via gf / find_pattern_in_path (used by [i, gf, etc.)
+func Test_includeexpr_insecure_copied_to_new_buffer()
+  func Xleakinclude(fname)
+    call writefile(['leak'], 'Xleak_inex')
+    return a:fname
+  endfunc
+  new
+  sandbox setglobal includeexpr=Xleakinclude(v:fname)
+  enew!
+  call setline(1, ['#include "foo.h"'])
+  silent! normal! [i
+  call assert_false(filereadable('Xleak_inex'))
+  call delete('Xleak_inex')
+  set includeexpr&
+  delfunc Xleakinclude
+  bwipe!
 endfunc
 
 " vim: shiftwidth=2 sts=2 expandtab

@@ -1,12 +1,30 @@
 local M = {}
 
 M.vars = {
+  argf = {
+    type = 'string[]',
+    desc = [=[
+      File arguments (expanded to absolute paths) given at startup.
+
+      Unlike |v:argv|, this does not include option arguments
+      such as `-u`, `--cmd`, or `+cmd`. Unlike |argv()|, it is not
+      affected by later |:args|, |:argadd|, or plugin modifications.
+
+      Example: >
+        nvim file1.txt +ls -- file2.txt
+        :echo v:argf
+        " ['/path/to/cwd/file1.txt', '/path/to/cwd/file2.txt']
+      <
+    ]=],
+  },
   argv = {
     type = 'string[]',
     desc = [=[
-      The command line arguments Vim was invoked with.  This is a
-      list of strings.  The first item is the Vim command.
-      See |v:progpath| for the command with full path.
+      Command line arguments (`-u`, `--cmd`, `+cmd`, …) Nvim was
+      invoked with.  The first item is the Nvim command.
+
+      See |v:progpath| to get the full path to Nvim.
+      See |v:argf| to get only file args, without other options.
     ]=],
   },
   char = {
@@ -126,7 +144,9 @@ M.vars = {
     type = 'integer',
     desc = [=[
       Number of screen cells that can be used for an `:echo` message
-      in the last screen line before causing the |hit-enter-prompt|.
+      in the last screen line before causing the |hit-enter| prompt
+      (no longer applicable when |ui2| is enabled).
+
       Depends on 'showcmd', 'ruler' and 'columns'.  You need to
       check 'cmdheight' for whether there are full-width lines
       available above the last line.
@@ -135,7 +155,7 @@ M.vars = {
   errmsg = {
     type = 'string',
     desc = [=[
-      Last given error message.
+      Last error message that occurred (not necessarily displayed).
       Modifiable (can be set).
       Example: >vim
         let v:errmsg = ""
@@ -248,8 +268,26 @@ M.vars = {
       Exit code, or |v:null| before invoking the |VimLeavePre|
       and |VimLeave| autocmds.  See |:q|, |:x| and |:cquit|.
       Example: >vim
-        :au VimLeave * echo "Exit value is " .. v:exiting
+        :au VimLeave * echo "Exit code is " .. v:exiting
       <
+    ]=],
+  },
+  exitreason = {
+    type = 'string',
+    desc = [=[
+      Reason for the current exit. Set before |QuitPre|. Reset if
+      exit was canceled.
+
+      Possible values:
+      - ""          Not exiting, or exit was canceled.
+      - "quit"      |:quit|, |:qall|, |:wq|, |ZZ|, |ZQ|, etc.
+      - "restart"   |:restart|, |ZR|.
+      - "restart!"  |:restart!|, |[count]||ZR|.
+
+      Example: >vim
+        autocmd ExitPre * if v:exitreason ==# 'restart' | echomsg 'restarting' | endif
+      <
+      Read-only.
     ]=],
   },
   fcs_choice = {
@@ -281,12 +319,12 @@ M.vars = {
       The reason why the |FileChangedShell| event was triggered.
       Can be used in an autocommand to decide what to do and/or what
       to set v:fcs_choice to.  Possible values:
-        deleted   file no longer exists
-        conflict  file contents, mode or timestamp was
+      - deleted   file no longer exists
+      - conflict  file contents, mode or timestamp was
                   changed and buffer is modified
-        changed   file contents has changed
-        mode      mode of file changed
-        time      only file timestamp changed
+      - changed   file contents has changed
+      - mode      mode of file changed
+      - time      only file timestamp changed
     ]=],
   },
   fname = {
@@ -408,6 +446,18 @@ M.vars = {
       It can be different from |v:ctype| when messages are desired
       in a different language than what is used for character
       encoding.  See |multi-lang|.
+    ]=],
+  },
+  useractive = {
+    type = 'integer',
+    tags = { 'user-idle' },
+    desc = [=[
+      Timestamp (nanoseconds since UNIX epoch) indicating the most
+      recent user activity, i.e. when a key is received from a UI
+      (TUI input or |nvim_input()|).
+
+      Initialized to 0 (no user activity since startup).
+      Read-only.
     ]=],
   },
   lc_time = {
@@ -648,8 +698,6 @@ M.vars = {
       screen to scroll up.  It's only set when it is empty, thus the
       first reason is remembered.  It is set to "Unknown" for a
       typed command.
-      This can be used to find out why your script causes the
-      hit-enter prompt.
     ]=],
   },
   searchforward = {
@@ -716,6 +764,29 @@ M.vars = {
       not finished.  Refer to |getstacktrace()| for the structure of
       stack trace.  See also |v:exception|, |v:throwpoint|, and
       |throw-variables|.
+    ]=],
+  },
+  starttime = {
+    type = 'integer',
+    desc = [=[
+      Timestamp (nanoseconds since UNIX epoch) when the Nvim process
+      started.
+
+      To see the current "uptime": >lua
+        vim.print(('uptime: %d seconds'):format(os.time() - (vim.v.starttime / 1e9)))
+      <
+      Read-only.
+    ]=],
+  },
+  startreason = {
+    type = 'string',
+    desc = [=[
+      The reason Nvim started. Possible values:
+      - "normal"    Normal startup, yearning for life, etc.
+      - "restart"   Started by |:restart|.
+      - "restart!"  Started by |:restart!|.
+
+      Read-only.
     ]=],
   },
   statusmsg = {
@@ -815,10 +886,10 @@ M.vars = {
   termresponse = {
     type = 'string',
     desc = [=[
-      The value of the most recent OSC or DCS control sequence
-      received by Nvim from the terminal. This can be read in a
-      |TermResponse| event handler after querying the terminal using
-      another escape sequence.
+      The most recent OSC, DCS, APC, or recognized CSI (DA1, kitty
+      multiple-cursors) control sequence received by Nvim from the
+      host-terminal. Can be read in a |TermResponse| event handler
+      after querying the terminal.
     ]=],
   },
   testing = {
@@ -898,6 +969,16 @@ M.vars = {
     type = 'integer',
     desc = [=[
       0 during startup, 1 just before |VimEnter|.
+      See also |v:vim_did_init|, which is set earlier.
+      Read-only.
+    ]=],
+  },
+  vim_did_init = {
+    type = 'integer',
+    desc = [=[
+      0 during initialization, 1 after sourcing the user |vimrc|,
+      just before |load-plugins|.
+      See also |v:vim_did_enter|, which is set later.
       Read-only.
     ]=],
   },

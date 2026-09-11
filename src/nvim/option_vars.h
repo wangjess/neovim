@@ -1,6 +1,8 @@
 #pragma once
 
+#include "nvim/eval/typval_defs.h"  // IWYU pragma: keep
 #include "nvim/macros_defs.h"
+#include "nvim/option_defs.h"
 #include "nvim/os/os_defs.h"
 #include "nvim/sign_defs.h"
 #include "nvim/statusline_defs.h"
@@ -32,6 +34,17 @@
   "%*[^\"]\"%f\"%*\\D%l: %m,\"%f\"%*\\D%l: %m,%-Gg%\\?make[%*\\d]: *** [%f:%l:%m,%-Gg%\\?make: *** [%f:%l:%m,%-G%f:%l: (Each undeclared identifier is reported only once,%-G%f:%l: for each function it appears in.),%-GIn file included from %f:%l:%c:,%-GIn file included from %f:%l:%c\\,,%-GIn file included from %f:%l:%c,%-GIn file included from %f:%l,%-G%*[ ]from %f:%l:%c,%-G%*[ ]from %f:%l:,%-G%*[ ]from %f:%l\\,,%-G%*[ ]from %f:%l,%f:%l:%c:%m,%f(%l):%m,%f:%l:%m,\"%f\"\\, line %l%*\\D%c%*[^ ] %m,%D%*\\a[%*\\d]: Entering directory %*[`']%f',%X%*\\a[%*\\d]: Leaving directory %*[`']%f',%D%*\\a: Entering directory %*[`']%f',%X%*\\a: Leaving directory %*[`']%f',%DMaking %*\\a in %f,%f|%l| %m"
 #endif
 
+// Default values for 'guifont'
+#ifdef MSWIN
+# define DFLT_GFN "Cascadia Code,Cascadia Mono,Consolas,Courier New,monospace"
+#elif defined(__APPLE__)
+# define DFLT_GFN "SF Mono,Menlo,Monaco,Courier New,monospace"
+#elif defined(__linux__)
+# define DFLT_GFN "Source Code Pro,DejaVu Sans Mono,Courier New,monospace"
+#else
+# define DFLT_GFN "DejaVu Sans Mono,Courier New,monospace"
+#endif
+
 #define DFLT_GREPFORMAT "%f:%l:%m,%f:%l%m,%f  %l%m"
 
 // Possible values for 'encoding'
@@ -46,81 +59,16 @@
 #define EOL_DOS         1       // CR NL
 #define EOL_MAC         2       // CR
 
-// Formatting options for p_fo 'formatoptions'
-#define FO_WRAP         't'
-#define FO_WRAP_COMS    'c'
-#define FO_RET_COMS     'r'
-#define FO_OPEN_COMS    'o'
-#define FO_NO_OPEN_COMS '/'
-#define FO_Q_COMS       'q'
-#define FO_Q_NUMBER     'n'
-#define FO_Q_SECOND     '2'
-#define FO_INS_VI       'v'
-#define FO_INS_LONG     'l'
-#define FO_INS_BLANK    'b'
-#define FO_MBYTE_BREAK  'm'     // break before/after multi-byte char
-#define FO_MBYTE_JOIN   'M'     // no space before/after multi-byte char
-#define FO_MBYTE_JOIN2  'B'     // no space between multi-byte chars
-#define FO_ONE_LETTER   '1'
-#define FO_WHITE_PAR    'w'     // trailing white space continues paragr.
-#define FO_AUTO         'a'     // automatic formatting
-#define FO_RIGOROUS_TW  ']'     // respect textwidth rigorously
-#define FO_REMOVE_COMS  'j'     // remove comment leaders when joining lines
-#define FO_PERIOD_ABBR  'p'     // don't break a single space after a period
-
+// Formatting options for 'formatoptions': the per-flag kFo* constants are generated from the
+// option's `flagchars` schema (options.lua); FO_ALL is the concatenated set for do_set().
 #define DFLT_FO_VI      "vt"
 #define DFLT_FO_VIM     "tcqj"
 #define FO_ALL          "tcro/q2vlb1mMBn,aw]jp"   // for do_set()
 
 #define MAX_MCO  6  // fixed value for 'maxcombine'
 
-// characters for the p_cpo option:
-#define CPO_ALTREAD     'a'     // ":read" sets alternate file name
-#define CPO_ALTWRITE    'A'     // ":write" sets alternate file name
-#define CPO_BAR         'b'     // "\|" ends a mapping
-#define CPO_BSLASH      'B'     // backslash in mapping is not special
-#define CPO_SEARCH      'c'
-#define CPO_CONCAT      'C'     // Don't concatenate sourced lines
-#define CPO_DOTTAG      'd'     // "./tags" in 'tags' is in current dir
-#define CPO_DIGRAPH     'D'     // No digraph after "r", "f", etc.
-#define CPO_EXECBUF     'e'
-#define CPO_EMPTYREGION 'E'     // operating on empty region is an error
-#define CPO_FNAMER      'f'     // set file name for ":r file"
-#define CPO_FNAMEW      'F'     // set file name for ":w file"
-#define CPO_INTMOD      'i'     // interrupt a read makes buffer modified
-#define CPO_INDENT      'I'     // remove auto-indent more often
-#define CPO_ENDOFSENT   'J'     // need two spaces to detect end of sentence
-#define CPO_KOFFSET     'K'     // don't wait for key code in mappings
-#define CPO_LITERAL     'l'     // take char after backslash in [] literal
-#define CPO_LISTWM      'L'     // 'list' changes wrapmargin
-#define CPO_SHOWMATCH   'm'
-#define CPO_MATCHBSL    'M'     // "%" ignores use of backslashes
-#define CPO_NUMCOL      'n'     // 'number' column also used for text
-#define CPO_LINEOFF     'o'
-#define CPO_OVERNEW     'O'     // silently overwrite new file
-#define CPO_FNAMEAPP    'P'     // set file name for ":w >>file"
-#define CPO_JOINCOL     'q'     // with "3J" use column after first join
-#define CPO_REDO        'r'
-#define CPO_REMMARK     'R'     // remove marks when filtering
-#define CPO_BUFOPT      's'
-#define CPO_BUFOPTGLOB  'S'
-#define CPO_TAGPAT      't'     // tag pattern is used for "n"
-#define CPO_UNDO        'u'     // "u" undoes itself
-#define CPO_BACKSPACE   'v'     // "v" keep deleted text
-#define CPO_FWRITE      'W'     // "w!" doesn't overwrite readonly files
-#define CPO_ESC         'x'
-#define CPO_REPLCNT     'X'     // "R" with a count only deletes chars once
-#define CPO_YANK        'y'
-#define CPO_KEEPRO      'Z'     // don't reset 'readonly' on ":w!"
-#define CPO_DOLLAR      '$'
-#define CPO_FILTER      '!'
-#define CPO_MATCH       '%'
-#define CPO_PLUS        '+'     // ":write file" resets 'modified'
-#define CPO_REGAPPEND   '>'     // insert NL when appending to a register
-#define CPO_SCOLON      ';'     // using "," and ";" will skip over char if
-                                // cursor would not move
-#define CPO_NOSYMLINKS  '~'     // don't resolve symlinks when changing directory
-#define CPO_CHANGEW     '_'     // "cw" special-case
+// characters for the p_cpo option: the per-flag kCpo* constants are generated from the
+// option's `flagchars` schema (options.lua). CPO_VI/CPO_VIM are the Vi/Vim default sets.
 // default values for Vim and Vi
 #define CPO_VIM         "aABceFs_"
 #define CPO_VI          "aAbBcCdDeEfFiIJKlLmMnoOpPqrRsStuvWxXyZ$!%+>;~_"
@@ -128,17 +76,10 @@
 // characters for p_ww option:
 #define WW_ALL          "bshl<>[]~"
 
-// characters for p_mouse option:
-#define MOUSE_NORMAL    'n'             // use mouse in Normal mode
-#define MOUSE_VISUAL    'v'             // use mouse in Visual/Select mode
-#define MOUSE_INSERT    'i'             // use mouse in Insert mode
-#define MOUSE_COMMAND   'c'             // use mouse in Command-line mode
-#define MOUSE_HELP      'h'             // use mouse in help buffers
-#define MOUSE_RETURN    'r'             // use mouse for hit-return message
+// characters for p_mouse option: the per-flag kMouse* constants are generated from the option's
+// `flagchars` schema (options.lua).
 #define MOUSE_A         "nvich"         // used for 'a' flag
 #define MOUSE_ALL       "anvichr"       // all possible characters
-#define MOUSE_NONE      ' '             // don't use Visual selection
-#define MOUSE_NONEF     'x'             // forced modeless selection
 
 // default vertical and horizontal mouse scroll values.
 // Note: This should be in sync with the default mousescroll option.
@@ -147,30 +88,11 @@
 
 #define COCU_ALL        "nvic"          // flags for 'concealcursor'
 
-/// characters for p_shm option:
-enum {
-  SHM_RO             = 'r',  ///< Readonly.
-  SHM_MOD            = 'm',  ///< Modified.
-  SHM_LINES          = 'l',  ///< "L" instead of "lines".
-  SHM_WRI            = 'w',  ///< "[w]" instead of "written".
-  SHM_ABBREVIATIONS  = 'a',  ///< Use abbreviations from #SHM_ALL_ABBREVIATIONS.
-  SHM_WRITE          = 'W',  ///< Don't use "written" at all.
-  SHM_TRUNC          = 't',  ///< Truncate file messages.
-  SHM_TRUNCALL       = 'T',  ///< Truncate all messages.
-  SHM_OVER           = 'o',  ///< Overwrite file messages.
-  SHM_OVERALL        = 'O',  ///< Overwrite more messages.
-  SHM_SEARCH         = 's',  ///< No search hit bottom messages.
-  SHM_ATTENTION      = 'A',  ///< No ATTENTION messages.
-  SHM_INTRO          = 'I',  ///< Intro messages.
-  SHM_COMPLETIONMENU = 'c',  ///< Completion menu messages.
-  SHM_COMPLETIONSCAN = 'C',  ///< Completion scanning messages.
-  SHM_RECORDING      = 'q',  ///< No recording message.
-  SHM_FILEINFO       = 'F',  ///< No file info messages.
-  SHM_SEARCHCOUNT    = 'S',  ///< No search stats: '[1/10]'
-};
+// characters for the p_shm option: the per-flag kShm* constants are generated from the option's
+// `flagchars` schema (options.lua).
 /// Represented by 'a' flag.
 #define SHM_ALL_ABBREVIATIONS ((char[]) { \
-    SHM_RO, SHM_MOD, SHM_LINES, SHM_WRI, \
+    kShmRo, kShmMod, kShmLines, kShmWri, \
     0 })
 
 // characters for p_go:
@@ -222,8 +144,8 @@ enum {
     STL_PREVIEWFLAG, STL_PREVIEWFLAG_ALT, STL_MODIFIED, STL_MODIFIED_ALT, \
     STL_QUICKFIX, STL_PERCENTAGE, STL_ALTPERCENT, STL_ARGLISTSTAT, STL_PAGENUM, \
     STL_SHOWCMD, STL_FOLDCOL, STL_SIGNCOL, STL_VIM_EXPR, STL_SEPARATE, \
-    STL_TRUNCMARK, STL_USER_HL, STL_HIGHLIGHT, STL_TABPAGENR, STL_TABCLOSENR, \
-    STL_CLICK_FUNC, STL_TABPAGENR, STL_TABCLOSENR, STL_CLICK_FUNC, \
+    STL_TRUNCMARK, STL_USER_HL, STL_HIGHLIGHT, STL_HIGHLIGHT_COMB, STL_TABPAGENR, \
+    STL_TABCLOSENR, STL_CLICK_FUNC, STL_TABPAGENR, STL_TABCLOSENR, STL_CLICK_FUNC, \
     0, })
 
 // arguments for can_bs()
@@ -258,9 +180,9 @@ EXTERN OptInt p_channel;         ///< 'channel'
 EXTERN char *p_cink;             ///< 'cinkeys'
 EXTERN char *p_cinsd;            ///< 'cinscopedecls'
 EXTERN char *p_cinw;             ///< 'cinwords'
-EXTERN char *p_cfu;              ///< 'completefunc'
-EXTERN char *p_ofu;              ///< 'omnifunc'
-EXTERN char *p_tsrfu;            ///< 'thesaurusfunc'
+EXTERN Callback p_cfu;          ///< 'completefunc'
+EXTERN Callback p_ofu;          ///< 'omnifunc'
+EXTERN Callback p_tsrfu;        ///< 'thesaurusfunc'
 EXTERN int p_ci;                 ///< 'copyindent'
 EXTERN int p_ar;                 ///< 'autoread'
 EXTERN int p_aw;                 ///< 'autowrite'
@@ -284,7 +206,7 @@ EXTERN char *p_cmp;             ///< 'casemap'
 EXTERN unsigned cmp_flags;
 EXTERN char *p_enc;             ///< 'encoding'
 EXTERN int p_deco;              ///< 'delcombine'
-EXTERN char *p_ccv;             ///< 'charconvert'
+EXTERN Callback p_ccv;          ///< 'charconvert'
 EXTERN char *p_cino;            ///< 'cinoptions'
 EXTERN char *p_cedit;           ///< 'cedit'
 EXTERN char *p_cb;              ///< 'clipboard'
@@ -296,8 +218,6 @@ EXTERN char *p_cpt;             ///< 'complete'
 EXTERN OptInt p_cto;            ///< 'completetimeout'
 EXTERN OptInt p_columns;        ///< 'columns'
 EXTERN int p_confirm;           ///< 'confirm'
-EXTERN char *p_cfc;             ///< 'completefuzzycollect'
-EXTERN unsigned cfc_flags;      ///< flags from 'completefuzzycollect'
 EXTERN char *p_cia;             ///< 'completeitemalign'
 EXTERN unsigned cia_flags;      ///< order flags of 'completeitemalign'
 EXTERN char *p_cot;             ///< 'completeopt'
@@ -320,7 +240,7 @@ EXTERN char *p_def;             ///< 'define'
 EXTERN char *p_inc;
 EXTERN char *p_dia;             ///< 'diffanchors'
 EXTERN char *p_dip;             ///< 'diffopt'
-EXTERN char *p_dex;             ///< 'diffexpr'
+EXTERN Callback p_dex;          ///< 'diffexpr'
 EXTERN char *p_dict;            ///< 'dictionary'
 EXTERN int p_dg;                ///< 'digraph'
 EXTERN char *p_dir;             ///< 'directory'
@@ -347,13 +267,13 @@ EXTERN char *p_ffs;             ///< 'fileformats'
 EXTERN int p_fic;               ///< 'fileignorecase'
 EXTERN char *p_ft;              ///< 'filetype'
 EXTERN char *p_fcs;             ///< 'fillchar'
-EXTERN char *p_ffu;             ///< 'findfunc'
+EXTERN Callback p_ffu;          ///< 'findfunc'
 EXTERN int p_fixeol;            ///< 'fixendofline'
 EXTERN char *p_fcl;             ///< 'foldclose'
 EXTERN OptInt p_fdls;           ///< 'foldlevelstart'
 EXTERN char *p_fdo;             ///< 'foldopen'
 EXTERN unsigned fdo_flags;
-EXTERN char *p_fex;             ///< 'formatexpr'
+EXTERN Callback p_fex;          ///< 'formatexpr'
 EXTERN char *p_flp;             ///< 'formatlistpat'
 EXTERN char *p_fo;              ///< 'formatoptions'
 EXTERN char *p_fp;              ///< 'formatprg'
@@ -376,12 +296,11 @@ EXTERN int p_ic;                ///< 'ignorecase'
 EXTERN OptInt p_iminsert;       ///< 'iminsert'
 EXTERN OptInt p_imsearch;       ///< 'imsearch'
 EXTERN int p_inf;               ///< 'infercase'
-EXTERN char *p_inex;            ///< 'includeexpr'
+EXTERN Callback p_inex;         ///< 'includeexpr'
 EXTERN int p_is;                ///< 'incsearch'
-EXTERN char *p_inde;            ///< 'indentexpr'
+EXTERN Callback p_inde;         ///< 'indentexpr'
 EXTERN char *p_indk;            ///< 'indentkeys'
 EXTERN char *p_icm;             ///< 'inccommand'
-EXTERN char *p_ise;             ///< 'isexpand'
 EXTERN char *p_isf;             ///< 'isfname'
 EXTERN char *p_isi;             ///< 'isident'
 EXTERN char *p_isk;             ///< 'iskeyword'
@@ -436,10 +355,10 @@ EXTERN OptInt p_mousescroll_hor INIT( = MOUSESCROLL_HOR_DFLT);
 EXTERN OptInt p_mouset;         ///< 'mousetime'
 EXTERN int p_more;              ///< 'more'
 EXTERN char *p_nf;              ///< 'nrformats'
-EXTERN char *p_opfunc;          ///< 'operatorfunc'
+EXTERN Callback p_opfunc;       ///< 'operatorfunc'
 EXTERN char *p_para;            ///< 'paragraphs'
 EXTERN int p_paste;             ///< 'paste'
-EXTERN char *p_pex;             ///< 'patchexpr'
+EXTERN Callback p_pex;          ///< 'patchexpr'
 EXTERN char *p_pm;              ///< 'patchmode'
 EXTERN char *p_path;            ///< 'path'
 EXTERN char *p_cdpath;          ///< 'cdpath'
@@ -452,18 +371,21 @@ EXTERN unsigned rdb_flags;
 EXTERN OptInt p_rdt;            ///< 'redrawtime'
 EXTERN OptInt p_re;             ///< 'regexpengine'
 EXTERN OptInt p_report;         ///< 'report'
+EXTERN char *p_pvp;             ///< 'previewpopup'
 EXTERN OptInt p_pvh;            ///< 'previewheight'
 EXTERN OptInt p_chi;            ///< 'chistory'
 EXTERN int p_ari;               ///< 'allowrevins'
 EXTERN int p_ri;                ///< 'revins'
 EXTERN int p_ru;                ///< 'ruler'
 EXTERN char *p_ruf;             ///< 'rulerformat'
+EXTERN char *p_plf;             ///< 'packlockfile'
 EXTERN char *p_pp;              ///< 'packpath'
-EXTERN char *p_qftf;            ///< 'quickfixtextfunc'
+EXTERN Callback p_qftf;         ///< 'quickfixtextfunc'
 EXTERN char *p_rtp;             ///< 'runtimepath'
 EXTERN OptInt p_scbk;           ///< 'scrollback'
 EXTERN OptInt p_sj;             ///< 'scrolljump'
 EXTERN OptInt p_so;             ///< 'scrolloff'
+EXTERN OptInt p_sop;            ///< 'scrolloffpad'
 EXTERN char *p_sbo;             ///< 'scrollopt'
 EXTERN char *p_sections;        ///< 'sections'
 EXTERN int p_secure;            ///< 'secure'
@@ -507,7 +429,7 @@ EXTERN OptInt p_tpm;            ///< 'tabpagemax'
 EXTERN char *p_tal;             ///< 'tabline'
 EXTERN char *p_tpf;             ///< 'termpastefilter'
 EXTERN unsigned tpf_flags;      ///< flags from 'termpastefilter'
-EXTERN char *p_tfu;             ///< 'tagfunc'
+EXTERN Callback p_tfu;          ///< 'tagfunc'
 EXTERN char *p_spc;             ///< 'spellcapcheck'
 EXTERN char *p_spf;             ///< 'spellfile'
 EXTERN char *p_spl;             ///< 'spelllang'
@@ -544,6 +466,7 @@ EXTERN char *p_tsr;             ///< 'thesaurus'
 EXTERN int p_tgc;               ///< 'termguicolors'
 EXTERN int p_ttimeout;          ///< 'ttimeout'
 EXTERN OptInt p_ttm;            ///< 'ttimeoutlen'
+EXTERN int p_tf;                ///< 'ttyfast'
 EXTERN char *p_udir;            ///< 'undodir'
 EXTERN int p_udf;               ///< 'undofile'
 EXTERN OptInt p_ul;             ///< 'undolevels'
@@ -595,7 +518,9 @@ EXTERN int p_cdh;               ///< 'cdhome'
 // Value for b_p_ul indicating the global value must be used.
 #define NO_LOCAL_UNDOLEVEL (-123456)
 
-#define ERR_BUFLEN 80
+// Buffer for an option-set error message. Large enough to list an option's valid values (see
+// opt_invalid_value_err()); the value is appended separately into IObuff.
+#define ERR_BUFLEN 256
 
 #define SB_MAX 1000000  // Maximum 'scrollback' value.
 

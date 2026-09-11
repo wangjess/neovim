@@ -50,6 +50,7 @@
 #include "nvim/fileio.h"
 #include "nvim/gettext_defs.h"
 #include "nvim/globals.h"
+#include "nvim/main.h"
 #include "nvim/map_defs.h"
 #include "nvim/memfile.h"
 #include "nvim/memfile_defs.h"
@@ -317,7 +318,7 @@ bhdr_T *mf_get(memfile_T *mfp, blocknr_T nr, unsigned page_count)
   }
 
   hp->bh_flags |= BH_LOCKED;
-  pmap_put(int64_t)(&mfp->mf_hash, hp->bh_bnum, hp);  // put in front of hash table
+  pmap_put(int64_t)(&mfp->mf_hash, hp->bh_bnum, hp);
 
   return hp;
 }
@@ -411,7 +412,7 @@ int mf_sync(memfile_T *mfp, int flags)
         if (os_char_avail()) {
           break;
         }
-      } else {
+      } else if (!main_loop.recursive) {  // May reach here on OOM in libuv callback
         os_breakcheck();
       }
       if (got_int) {

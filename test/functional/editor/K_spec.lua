@@ -1,6 +1,7 @@
 local t = require('test.testutil')
 local n = require('test.functional.testnvim')()
 
+local describe, it, before_each, after_each = t.describe, t.it, t.before_each, t.after_each
 local eq, clear, eval, feed, api, retry = t.eq, n.clear, n.eval, n.feed, n.api, t.retry
 
 describe('K', function()
@@ -65,6 +66,6 @@ describe('K', function()
     api.nvim_set_option_value('keywordprg', '', {})
     api.nvim_buf_set_lines(0, 0, -1, true, { 'doesnotexist' })
     feed('K')
-    eq('E149: Sorry, no help for doesnotexist', api.nvim_get_vvar('errmsg'))
+    eq('E149: No help for doesnotexist', api.nvim_get_vvar('errmsg'))
   end)
 end)

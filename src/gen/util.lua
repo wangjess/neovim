@@ -20,6 +20,7 @@ end
 -- Map of api_level:version, by inspection of:
 --    :lua= vim.mpack.decode(vim.fn.readfile('test/functional/fixtures/api_level_9.mpack','B')).version
 M.version_level = {
+  [15] = '0.13.0',
   [14] = '0.12.0',
   [13] = '0.11.0',
   [12] = '0.10.0',
@@ -235,9 +236,13 @@ local function render_md(node, start_indent, indent, text_width, level, is_list)
 
   if ntype == 'text' then
     parts[#parts + 1] = node.text
+  elseif ntype == 'atx_heading' then
+    parts[#parts + 1] = ('*%s*'):format(node.heading_content.text)
   elseif ntype == 'html_tag' then
     error('html_tag: ' .. node.text)
   elseif ntype == 'inline_link' then
+    -- Markdown links with empty URLs, e.g. [lsp-buftypes](), are converted
+    -- to vim help tags, e.g. *lsp-buftypes*.
     vim.list_extend(parts, { '*', node[1].text, '*' })
   elseif ntype == 'shortcut_link' then
     if node[1].text:find('^<.*>$') then
@@ -308,7 +313,7 @@ local function render_md(node, start_indent, indent, text_width, level, is_list)
     end
     parts[#parts + 1] = '<\n'
   elseif ntype == 'html_block' then
-    local text = node.text:gsub('^<pre>help', '')
+    local text = node.text:gsub('^<pre>help%s*', '')
     text = text:gsub('</pre>%s*$', '')
     parts[#parts + 1] = text
   elseif ntype == 'list_marker_dot' then
@@ -316,10 +321,6 @@ local function render_md(node, start_indent, indent, text_width, level, is_list)
   elseif contains(ntype, { 'list_marker_minus', 'list_marker_star' }) then
     parts[#parts + 1] = '• '
   elseif ntype == 'list_item' then
-    -- HACK(MariaSolOs): Revert this after the vimdoc parser supports numbered list-items (https://github.com/neovim/tree-sitter-vimdoc/issues/144)
-    if (node[1].text or ''):match('[2-9]%.') then
-      parts[#parts + 1] = '\n'
-    end
     parts[#parts + 1] = string.rep(' ', indent)
     local offset = node[1].type == 'list_marker_dot' and 3 or 2
     for i, child in ipairs(node) do
@@ -355,7 +356,7 @@ local function render_md(node, start_indent, indent, text_width, level, is_list)
 end
 
 --- @param text_width integer
-local function align_tags(text_width)
+function M.align_tags(text_width)
   --- @param line string
   --- @return string
   return function(line)
@@ -390,7 +391,7 @@ function M.md_to_vimdoc(text, start_indent, indent, text_width, is_list)
 
   local lines = vim.split(table.concat(ret):gsub(NBSP, ' '), '\n')
 
-  lines = vim.tbl_map(align_tags(text_width), lines)
+  lines = vim.tbl_map(M.align_tags(text_width), lines)
 
   local s = table.concat(lines, '\n')
 
@@ -399,6 +400,19 @@ function M.md_to_vimdoc(text, start_indent, indent, text_width, is_list)
   s = s:gsub('\n+%s*>\n?\n', ' >\n')
 
   return s
+end
+
+--- Sorts a list in-place, with underscore-prefixed names last (e.g. "_cmdline_offset").
+--- If `key` is given, sorts by `item[key]`; otherwise sorts by value.
+---
+--- @param t any[]
+--- @param key? string
+function M.sort_by_key(t, key)
+  table.sort(t, function(a, b)
+    local a_val = key and a[key] or a
+    local b_val = key and b[key] or b
+    return a_val:gsub('^_', '~') < b_val:gsub('^_', '~')
+  end)
 end
 
 return M

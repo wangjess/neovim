@@ -2,6 +2,7 @@ local t = require('test.testutil')
 local n = require('test.functional.testnvim')()
 local Screen = require('test.functional.ui.screen')
 
+local describe, it, before_each, after_each = t.describe, t.it, t.before_each, t.after_each
 local clear = n.clear
 local command = n.command
 local expect_exit = n.expect_exit
@@ -18,7 +19,7 @@ local function _clear()
       '-i',
       shada_file, -- Need shada for these tests.
       '--cmd',
-      'set noswapfile undodir=. directory=. viewdir=. backupdir=. belloff= noshowcmd noruler',
+      "set noswapfile undodir=. directory=. viewdir=. backupdir=. belloff= noshowcmd noruler shada=!,'100,<50,s10,h",
     },
     args_rm = { '-i', '--cmd' },
   }
@@ -85,6 +86,15 @@ describe(':oldfiles', function()
 
     oldfiles = get_oldfiles('filter! file_ oldfiles')
     eq({ another }, oldfiles)
+
+    -- The original v:oldfiles index is preserved in the output (matches `message_filtered()` behavior).
+    local v_oldfiles = api.nvim_get_vvar('oldfiles')
+    local raw = eval([[split(execute('filter file_ oldfiles'), "\n")]])
+    for _, line in ipairs(raw) do
+      local idx, path = line:match('^(%d+):%s+(.+)$')
+      ok(idx ~= nil, 'numbered', line)
+      eq(path, v_oldfiles[tonumber(idx)])
+    end
   end)
 end)
 

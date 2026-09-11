@@ -1,6 +1,8 @@
 local t = require('test.testutil')
 local n = require('test.functional.testnvim')()
 local Screen = require('test.functional.ui.screen')
+local describe, it, after_each, pending, finally =
+  t.describe, t.it, t.after_each, t.pending, t.finally
 local uv = vim.uv
 
 local api = n.api
@@ -30,8 +32,8 @@ local function test_embed(ext_linegrid)
       [100] = { foreground = Screen.colors.NvimDarkCyan },
       [101] = { foreground = Screen.colors.NvimDarkRed },
       [102] = {
-        background = Screen.colors.NvimDarkGrey3,
-        foreground = Screen.colors.NvimLightGrey3,
+        background = Screen.colors.NvimLightGrey4,
+        foreground = Screen.colors.NvimDarkGrey2,
       },
     }
   end
@@ -40,7 +42,7 @@ local function test_embed(ext_linegrid)
     startup('--cmd', 'echoerr invalid+')
     screen:expect([[
                                                                   |*4
-      {102:                                                            }|
+      {3:                                                            }|
       {9:Error in pre-vimrc command line:}                            |
       {9:E121: Undefined variable: invalid}                           |
       {6:Press ENTER or type command to continue}^                     |
@@ -74,7 +76,7 @@ local function test_embed(ext_linegrid)
     screen:expect {
       grid = [[
                                                                   |*3
-      {102:                                                            }|
+      {3:                                                            }|
       {9:Error in pre-vimrc command line:}                            |
       {9:foo}                                                         |
       {9:bar}                                                         |
@@ -236,6 +238,7 @@ describe('--embed UI', function()
 
   it('updates cwd of attached UI #21771', function()
     clear { args_rm = { '--headless' } }
+    api.nvim_set_current_dir(t.paths.test_source_path)
 
     local screen = Screen.new(40, 8)
 
@@ -284,7 +287,6 @@ describe('--embed UI', function()
   end)
 
   it('closing stdio with another remote UI does not leak memory #36392', function()
-    t.skip(t.is_os('win')) -- n.connect() hangs on Windows
     clear({ args_rm = { '--headless' } })
     Screen.new()
     eq(1, #api.nvim_list_uis())
@@ -299,7 +301,6 @@ end)
 
 describe('--embed --listen UI', function()
   it('waits for connection on listening address', function()
-    t.skip(t.is_os('win'))
     clear()
     local child_server = assert(n.new_pipename())
     fn.jobstart({

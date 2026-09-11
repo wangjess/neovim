@@ -2,6 +2,7 @@ local t = require('test.testutil')
 local n = require('test.functional.testnvim')()
 local Screen = require('test.functional.ui.screen')
 
+local describe, it, before_each, pending = t.describe, t.it, t.before_each, t.pending
 local clear, feed = n.clear, n.feed
 local source = n.source
 local command = n.command
@@ -240,7 +241,7 @@ local function test_cmdline(linegrid)
     ]])
   end)
 
-  it('works with cmdline window', function()
+  it('with cmdwin', function()
     feed(':make')
     screen:expect {
       grid = [[
@@ -255,25 +256,22 @@ local function test_cmdline(linegrid)
     screen:expect([[
                                |
       {2:[No Name]                }|
-      {1::}make^                    |
+      {1::}mak^e                    |
       {3:[Command Line]           }|
                                |
     ]])
 
-    -- nested cmdline
+    -- cmdwin is a plain window so `:yank` opens a top-level cmdline. No nesting allowed. #40312
     feed(':yank')
     screen:expect {
       grid = [[
                                  |
         {2:[No Name]                }|
-        {1::}make^                    |
+        {1::}mak^e                    |
         {3:[Command Line]           }|
                                  |
       ]],
-      cmdline = {
-        nil,
-        { firstc = ':', content = { { 'yank' } }, pos = 4 },
-      },
+      cmdline = { { firstc = ':', content = { { 'yank' } }, pos = 4 } },
     }
 
     command('mode')
@@ -281,14 +279,11 @@ local function test_cmdline(linegrid)
       grid = [[
                                  |
         {2:[No Name]                }|
-        {1::}make^                    |
+        {1::}mak^e                    |
         {3:[Command Line]           }|
                                  |
       ]],
-      cmdline = {
-        nil,
-        { firstc = ':', content = { { 'yank' } }, pos = 4 },
-      },
+      cmdline = { { firstc = ':', content = { { 'yank' } }, pos = 4 } },
       reset = true,
     }
 
@@ -297,26 +292,14 @@ local function test_cmdline(linegrid)
       grid = [[
                                  |
         {2:[No Name]                }|
-        {1::}make^                    |
+        {1::}mak^e                    |
         {3:[Command Line]           }|
                                  |
       ]],
-      cmdline = { [2] = { abort = true } },
+      cmdline = { { abort = true } },
     }
 
     feed('<c-c>')
-    screen:expect {
-      grid = [[
-        ^                         |
-        {2:[No Name]                }|
-        {1::}make                    |
-        {3:[Command Line]           }|
-                                 |
-      ]],
-      cmdline = { { firstc = ':', content = { { 'make' } }, pos = 4 } },
-    }
-
-    command('redraw!')
     screen:expect {
       grid = [[
         ^                         |
@@ -797,6 +780,70 @@ local function test_cmdline(linegrid)
                                |
     ]])
   end)
+
+  it('works with exmode', function()
+    screen:try_resize(60, 12)
+    feed('1q:')
+    screen:expect([[
+                                                                  |
+      {1:~                                                           }|
+      {2:[No Name]                                                   }|
+      {1::}^                                                           |
+      {1:~                                                           }|*6
+      {3:[Ex mode]                                                   }|
+      {5:-- INSERT --}                                                |
+    ]])
+    feed('echo "foo"<CR>')
+    screen:expect([[
+                                                                  |
+      {1:~                                                           }|
+      {2:[No Name]                                                   }|
+      {1::}echo "foo"                                                 |
+      {1::}" foo                                                      |
+      {1::}^                                                           |
+      {1:~                                                           }|*4
+      {3:[Ex mode]                                                   }|
+      {5:-- INSERT --}                                                |
+    ]])
+    feed('<C-\\><C-N>vis<CR>')
+    screen:expect([[
+      ^                                                            |
+      {1:~                                                           }|*10
+                                                                  |
+    ]])
+    assert_alive()
+  end)
+
+  it('works with :lua debug.debug()', function()
+    feed(':lua debug.debug()<CR>')
+    screen:expect({
+      grid = [[
+        ^                         |
+        {1:~                        }|*3
+                                 |
+      ]],
+      cmdline = { { content = { { '' } }, pos = 0, prompt = 'lua_debug> ' } },
+    })
+    feed('print("foo")<CR>')
+    screen:expect({
+      grid = [[
+                                 |
+        {1:~                        }|*3
+        foo^                      |
+      ]],
+      cmdline = { { content = { { '' } }, pos = 0, prompt = 'lua_debug> ' } },
+      cmdline_block = { { { 'lua_debug> print("foo")' } } },
+    })
+    feed('<Esc>')
+    screen:expect({
+      grid = [[
+        ^                         |
+        {1:~                        }|*3
+                                 |
+      ]],
+      cmdline = { { abort = true } },
+    })
+  end)
 end
 
 -- the representation of cmdline and cmdline_block contents changed with ext_linegrid
@@ -858,15 +905,12 @@ describe('cmdline redraw', function()
       {3:[Command Line]                          }|
       {5:-- VISUAL --}                            |
     ]])
+    -- Ctrl-C closes cmdwin and drops back into pre-filled cmdline. #40312
     feed('<C-C>')
     screen:expect([[
                                               |
-      {1:~                                       }|*3
-      {2:[No Name]                               }|
-      {1::}a{17:bc}                                    |
-      {1:~                                       }|*2
-      {3:[Command Line]                          }|
-      :^abc                                    |
+      {1:~                                       }|*8
+      :abc^                                    |
     ]])
   end)
 
@@ -963,7 +1007,7 @@ describe('cmdline redraw', function()
       {3:                                                                           }|
       foo                                                                        |
       bar                                                                        |
-      Type number and <Enter> or click with the mouse (q or empty cancels): ^     |
+      Type number and <Enter> (q or empty cancels): ^                             |
     ]])
     command('redraw')
     screen:expect_unchanged()
@@ -995,6 +1039,27 @@ describe('cmdline redraw', function()
       {1:~                                                                          }|*3
       1 substitution on 1 line                                                   |
     ]])
+  end)
+
+  it('no empty cmdline after empty echo #18274', function()
+    feed(':foo')
+    api.nvim_echo({ { '' } }, false, {})
+    screen:expect([[
+                               |
+      {1:~                        }|*3
+      :foo^                     |
+    ]])
+    feed(('o'):rep(screen._width - 4))
+    -- No repeated cmdline redraws at screen width
+    screen:expect([[
+                               |
+      {1:~                        }|
+      {3:                         }|
+      :fooooooooooooooooooooooo|
+      ^                         |
+    ]])
+    command('call timer_start(0, {-> 1})')
+    screen:expect_unchanged()
   end)
 end)
 
@@ -1152,7 +1217,7 @@ end)
 
 it('tabline is not redrawn in Ex mode #24122', function()
   clear()
-  local screen = Screen.new(60, 5)
+  local screen = Screen.new(60, 8)
 
   exec([[
     set showtabline=2
@@ -1164,22 +1229,26 @@ it('tabline is not redrawn in Ex mode #24122', function()
     endfunction
   ]])
 
-  feed('gQ')
+  feed('1q:')
   screen:expect([[
     {2:foo                                                         }|
                                                                 |
-    {3:                                                            }|
-    Entering Ex mode.  Type "visual" to go to Normal mode.      |
-    :^                                                           |
+    {2:[No Name]                                                   }|
+    {1::}^                                                           |
+    {1:~                                                           }|*2
+    {3:[Ex mode]                                                   }|
+    {5:-- INSERT --}                                                |
   ]])
-
   feed('echo 1<CR>')
   screen:expect([[
-    {3:                                                            }|
-    Entering Ex mode.  Type "visual" to go to Normal mode.      |
-    :echo 1                                                     |
-    1                                                           |
-    :^                                                           |
+    {2:foo                                                         }|
+                                                                |
+    {2:[No Name]                                                   }|
+    {1::}echo 1                                                     |
+    {1::}" 1                                                        |
+    {1::}^                                                           |
+    {3:[Ex mode]                                                   }|
+    {5:-- INSERT --}                                                |
   ]])
 end)
 
@@ -1636,5 +1705,12 @@ describe('cmdheight=0', function()
       {1:~                        }|*3
       {3:[No Name]                }|
     ]])
+  end)
+
+  it('no spurious newline before first message with --headless mode', function()
+    local p = n.spawn_wait({
+      args = { '--cmd', 'set cmdheight=0', '-c', 'echo 1', '+q' },
+    })
+    eq('1', p.stderr)
   end)
 end)

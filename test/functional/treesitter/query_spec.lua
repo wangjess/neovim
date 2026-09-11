@@ -1,6 +1,7 @@
 local t = require('test.testutil')
 local n = require('test.functional.testnvim')()
 
+local describe, it, before_each = t.describe, t.it, t.before_each
 local clear = n.clear
 local dedent = t.dedent
 local eq = t.eq
@@ -451,6 +452,26 @@ void ui_refresh(void)
     eq({}, result)
   end)
 
+  it('supports builtin predicate has-parent?', function()
+    insert([[
+      int x = 123;
+      enum C { y = 124 };]])
+
+    local result = exec_lua(
+      get_query_result,
+      [[((number_literal) @literal (#has-parent? @literal "init_declarator"))]]
+    )
+    eq({ { 'literal', 'number_literal', { 0, 8, 0, 11 }, '123' } }, result)
+
+    -- The root node has no parent: the predicate does not match, rather than
+    -- erroring on the nil parent.
+    result = exec_lua(
+      get_query_result,
+      [[((translation_unit) @root (#has-parent? @root "translation_unit"))]]
+    )
+    eq({}, result)
+  end)
+
   it('allows loading query with escaped quotes and capture them `#{lua,vim}-match`?', function()
     insert('char* astring = "Hello World!";')
 
@@ -520,36 +541,6 @@ void ui_refresh(void)
         return nodes
       end)
 
-      eq({ { 0, 4, 0, 8 } }, res)
-    end
-
-    -- Once with the old API. Remove this whole 'do' block in 0.12
-    do
-      local res = exec_lua(function()
-        local query = vim.treesitter.query
-
-        local function is_main(match, _pattern, bufnr, predicate)
-          local node = match[predicate[2]]
-
-          return vim.treesitter.get_node_text(node, bufnr) == 'main'
-        end
-
-        local parser = vim.treesitter.get_parser(0, 'c')
-
-        query.add_predicate('is-main?', is_main, { all = false, force = true })
-
-        local query0 = query.parse('c', custom_query)
-
-        local nodes = {}
-        for _, node in query0:iter_captures(parser:parse()[1]:root(), 0) do
-          table.insert(nodes, { node:range() })
-        end
-
-        return nodes
-      end)
-
-      -- Remove this 'do' block in 0.12
-      -- eq(0, n.fn.has('nvim-0.12'))
       eq({ { 0, 4, 0, 8 } }, res)
     end
 
@@ -678,50 +669,6 @@ void ui_refresh(void)
       { 1, 0, 1, 10 },
       { 2, 0, 2, 10 },
     }, result)
-  end)
-
-  it('supports the old broken version of iter_matches #24738', function()
-    -- Delete this test in 0.12 when iter_matches is removed
-    -- eq(0, n.fn.has('nvim-0.12'))
-
-    insert(test_text)
-    local res = exec_lua(function()
-      local cquery = vim.treesitter.query.parse('c', test_query)
-      local parser = vim.treesitter.get_parser(0, 'c')
-      local tree = parser:parse()[1]
-      local res = {}
-      for pattern, match in cquery:iter_matches(tree:root(), 0, 7, 14, { all = false }) do
-        local mrepr = {}
-        for cid, node in pairs(match) do
-          table.insert(mrepr, { '@' .. cquery.captures[cid], node:type(), node:range() })
-        end
-        table.insert(res, { pattern, mrepr })
-      end
-      return res
-    end)
-
-    eq({
-      { 3, { { '@type', 'primitive_type', 8, 2, 8, 6 } } },
-      { 2, { { '@keyword', 'for', 9, 2, 9, 5 } } },
-      { 3, { { '@type', 'primitive_type', 9, 7, 9, 13 } } },
-      { 4, { { '@fieldarg', 'identifier', 11, 16, 11, 18 } } },
-      {
-        1,
-        {
-          { '@minfunc', 'identifier', 11, 12, 11, 15 },
-          { '@min_id', 'identifier', 11, 27, 11, 32 },
-        },
-      },
-      { 4, { { '@fieldarg', 'identifier', 12, 17, 12, 19 } } },
-      {
-        1,
-        {
-          { '@minfunc', 'identifier', 12, 13, 12, 16 },
-          { '@min_id', 'identifier', 12, 29, 12, 35 },
-        },
-      },
-      { 4, { { '@fieldarg', 'identifier', 13, 14, 13, 16 } } },
-    }, res)
   end)
 
   it('should use node range when omitted', function()
@@ -936,9 +883,9 @@ void ui_refresh(void)
         local query0 = vim.treesitter.query.parse('c', query)
         local match_preds = query0._match_predicates
         local called = 0
-        function query0:_match_predicates(...)
+        function query0._match_predicates(...)
           called = called + 1
-          return match_preds(self, ...)
+          return match_preds(...)
         end
         local parser = vim.treesitter.get_parser(0, 'c')
         local root = parser:parse()[1]:root()

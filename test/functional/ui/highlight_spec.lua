@@ -3,6 +3,7 @@ local n = require('test.functional.testnvim')()
 local Screen = require('test.functional.ui.screen')
 local os = require('os')
 
+local describe, it, before_each, after_each = t.describe, t.it, t.before_each, t.after_each
 local clear, feed, insert = n.clear, n.feed, n.insert
 local command, exec = n.command, n.exec
 local eval = n.eval
@@ -241,7 +242,10 @@ describe('highlight defaults', function()
 
   it('Cursor after `:hi clear|syntax reset` #6508', function()
     command('highlight clear|syntax reset')
-    eq('guifg=bg guibg=fg', eval([[matchstr(execute('hi Cursor'), '\v(gui|cterm).*$')]]))
+    eq(
+      'cterm=reverse guifg=bg guibg=fg',
+      eval([[matchstr(execute('hi Cursor'), '\v(gui|cterm).*$')]])
+    )
   end)
 
   it('Whitespace highlight', function()
@@ -673,8 +677,7 @@ describe('highlight', function()
       {1:  }{2:01}{3:234 67}{2:89}{5:             }|
       {4:~                        }|*2
       {7:[No Name] [+]            }|
-      {1:  }{6:-----------------------}|
-      {1:  }{6:-----------------------}|
+      {1:  }{6:-----------------------}|*2
       {1:  }                       |
       {8:[No Name]                }|
                                |
@@ -1378,6 +1381,34 @@ describe('CursorLine and CursorLineNr highlights', function()
                                                         |
     ]])
   end)
+
+  it('CursorLine overlays hl group linked to Normal', function()
+    local screen = Screen.new(50, 12)
+    screen:add_extra_attr_ids({
+      [101] = { background = Screen.colors.Grey90, foreground = Screen.colors.Grey100 },
+      [102] = { background = Screen.colors.DarkGray, foreground = Screen.colors.WebGreen },
+    })
+    command('hi Normal guibg=black guifg=white')
+    command('hi def link Test Normal')
+    feed('ifoo bar<ESC>')
+    feed(':call matchadd("Test", "bar")<cr>')
+    command('set cursorline')
+    screen:expect([[
+      {21:foo }{101:ba^r}{21:                                           }|
+      {1:~                                                 }|*10
+      :call matchadd("Test", "bar")                     |
+    ]])
+    api.nvim_buf_set_lines(0, 0, -1, false, { 'aaaaa', 'bbbbb' })
+    command('hi AAA guifg=Green guibg=DarkGrey ctermfg=Green ctermbg=DarkGrey')
+    fn.matchadd('AAA', 'aaaaa')
+    command('setlocal winhighlight=Normal:NormalFloat')
+    screen:expect([[
+      {102:aaaa^a}{21:                                             }|
+      {4:bbbbb                                             }|
+      {11:~                                                 }|*9
+      :call matchadd("Test", "bar")                     |
+    ]])
+  end)
 end)
 
 describe('CursorColumn highlight', function()
@@ -1423,6 +1454,24 @@ describe('CursorColumn highlight', function()
       {1:~                                                 }|*5
       {5:-- INSERT --}                                      |
     ]])
+  end)
+
+  -- oldtest: Test_cursorcolumn_virtualedit()
+  it('is correct with operator on empty line and virtualedit', function()
+    exec([[
+      set virtualedit=all
+      set cursorcolumn
+      call setline(1, ['', '', ''])
+      call cursor(3, 1)
+    ]])
+    screen:expect([[
+      {21: }                                                 |*2
+      ^                                                  |
+      {1:~                                                 }|*4
+                                                        |
+    ]])
+    feed('<Del>')
+    screen:expect_unchanged()
   end)
 
   -- oldtest: Test_cursorcolumn_callback()
@@ -1493,6 +1542,100 @@ describe('CursorColumn highlight', function()
       {100:line 2  ^                                          }|
       line 3  {30: }                                         |
       {1:~                                                 }|*4
+                                                        |
+    ]])
+  end)
+
+  it('is updated with completion active #39153', function()
+    command('set autocomplete cursorcolumn')
+    feed('iasdf<CR>')
+    screen:expect([[
+      {21:a}sdf                                              |
+      ^                                                  |
+      {1:~                                                 }|*5
+      {5:-- INSERT --}                                      |
+    ]])
+    feed('a')
+    screen:expect([[
+      a{21:s}df                                              |
+      a^                                                 |
+      {4:asdf           }{1:                                   }|
+      {1:~                                                 }|*4
+      {5:-- INSERT --}                                      |
+    ]])
+    feed('s')
+    screen:expect([[
+      as{21:d}f                                              |
+      as^                                                |
+      {4:asdf           }{1:                                   }|
+      {1:~                                                 }|*4
+      {5:-- INSERT --}                                      |
+    ]])
+    feed('d')
+    screen:expect([[
+      asd{21:f}                                              |
+      asd^                                               |
+      {4:asdf           }{1:                                   }|
+      {1:~                                                 }|*4
+      {5:-- INSERT --}                                      |
+    ]])
+    feed('f')
+    screen:expect([[
+      asdf{21: }                                             |
+      asdf^                                              |
+      {4:asdf           }{1:                                   }|
+      {1:~                                                 }|*4
+      {5:-- INSERT --}                                      |
+    ]])
+    feed('g')
+    screen:expect([[
+      asdf {21: }                                            |
+      asdfg^                                             |
+      {1:~                                                 }|*5
+      {5:-- INSERT --}                                      |
+    ]])
+    feed(' ')
+    screen:expect([[
+      asdf  {21: }                                           |
+      asdfg ^                                            |
+      {1:~                                                 }|*5
+      {5:-- INSERT --}                                      |
+    ]])
+    feed('<BS>')
+    screen:expect([[
+      asdf {21: }                                            |
+      asdfg^                                             |
+      {1:~                                                 }|*5
+      {5:-- INSERT --}                                      |
+    ]])
+    feed('<BS>')
+    screen:expect([[
+      asdf{21: }                                             |
+      asdf^                                              |
+      {4:asdf           }{1:                                   }|
+      {1:~                                                 }|*4
+      {5:-- INSERT --}                                      |
+    ]])
+    feed('<BS>')
+    screen:expect([[
+      asd{21:f}                                              |
+      asd^                                               |
+      {4:asdf           }{1:                                   }|
+      {1:~                                                 }|*4
+      {5:-- INSERT --}                                      |
+    ]])
+    feed('h')
+    screen:expect([[
+      asdf{21: }                                             |
+      asdh^                                              |
+      {1:~                                                 }|*5
+      {5:-- INSERT --}                                      |
+    ]])
+    feed('<Esc>')
+    screen:expect([[
+      asd{21:f}                                              |
+      asd^h                                              |
+      {1:~                                                 }|*5
                                                         |
     ]])
   end)
@@ -2641,5 +2784,19 @@ describe('fg/bg special colors', function()
     eq(new_guibg, eval('synIDattr(hlID("Visual"), "fg#")'))
     eq(new_guifg, eval('synIDattr(hlID("Visual"), "bg#")'))
     eq(new_guibg, eval('synIDattr(hlID("Visual"), "sp#")'))
+  end)
+
+  it('changed highlight is reflected in messages before redraw #17832', function()
+    local screen = Screen.new(50, 7, { rgb = true })
+    command('set termguicolors')
+    -- :echomsg in the same request, before the next redraw.
+    command('call nvim_set_hl(0, "MsgArea", {"fg": "Red"}) | echomsg "foo"')
+    screen:expect({
+      grid = [[
+        ^                                                  |
+        {1:~                                                 }|*5
+        {19:foo                                               }|
+      ]],
+    })
   end)
 end)

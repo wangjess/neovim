@@ -1,6 +1,7 @@
 local t = require('test.testutil')
 local n = require('test.functional.testnvim')()
 
+local describe, it, before_each = t.describe, t.it, t.before_each
 local clear = n.clear
 local eq = t.eq
 local command = n.command
@@ -15,12 +16,14 @@ before_each(clear)
 describe('treesitter language API', function()
   -- error tests not requiring a parser library
   it('handles missing language', function()
-    eq(
-      '.../treesitter.lua:0: Parser could not be created for buffer 1 and language "borklang"',
-      pcall_err(exec_lua, "parser = vim.treesitter.get_parser(0, 'borklang')")
+    local parser, error = exec_lua(function()
+      return vim.treesitter.get_parser(0, 'borklang')
+    end)
+    eq(NIL, parser)
+    matches(
+      '^Parser could not be created for buffer 1 and language "borklang": .+: No parser for language "borklang"$',
+      error
     )
-
-    eq(NIL, exec_lua("return vim.treesitter.get_parser(0, 'borklang', { error = false })"))
 
     -- actual message depends on platform
     matches(
@@ -107,11 +110,14 @@ describe('treesitter language API', function()
       eq('c', exec_lua('return vim.treesitter.get_parser(0):lang()'))
       command('set filetype=borklang')
       -- Should throw an error when filetype changes to borklang
-      eq(
-        '.../treesitter.lua:0: Parser could not be created for buffer 1 and language "borklang"',
-        pcall_err(exec_lua, "new_parser = vim.treesitter.get_parser(0, 'borklang')")
+      local parser, error = exec_lua(function()
+        return vim.treesitter.get_parser(0, 'borklang')
+      end)
+      eq(NIL, parser)
+      matches(
+        '^Parser could not be created for buffer 1 and language "borklang": .+: No parser for language "borklang"$',
+        error
       )
-      eq(NIL, exec_lua("return vim.treesitter.get_parser(0, 'borklang', { error = false })"))
     end
   )
 

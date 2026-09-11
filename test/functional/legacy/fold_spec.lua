@@ -1,8 +1,10 @@
 -- Tests for folding.
 
 local n = require('test.functional.testnvim')()
+local t = require('test.testutil')
 local Screen = require('test.functional.ui.screen')
 
+local describe, it, before_each = t.describe, t.it, t.before_each
 local feed, insert, feed_command, expect_any = n.feed, n.insert, n.feed_command, n.expect_any
 local command = n.command
 local exec = n.exec
@@ -294,6 +296,34 @@ describe('folding', function()
       four                                         |
       {1:~                                            }|*4
                                                    |
+    ]])
+  end)
+
+  -- oldtest: Test_foldtext_and_fillchars_rightleft()
+  it("fold text is displayed properly with 'rightleft'", function()
+    screen:try_resize(70, 5)
+    exec([[
+      let longtext = 'Lorem ipsum dolor sit amet, consectetur adipiscing'
+      let g:multibyte = 'Ｌｏｒｅｍ ｉｐｓｕｍ ｄｏｌｏｒ ｓｉｔ ａｍｅｔ'
+
+      call setline(1, [longtext, longtext, longtext])
+      1,2fold
+
+      setlocal rightleft
+      set noshowmode noshowcmd
+    ]])
+    screen:expect([[
+      {13:······gnicsipida rutetcesnoc ,tema tis rolod muspi meroL :senil 2  --^+}|
+                          gnicsipida rutetcesnoc ,tema tis rolod muspi meroL|
+      {1:                                                                     ~}|*2
+                                                                            |
+    ]])
+    command('call setline(1, [g:multibyte, g:multibyte, g:multibyte])')
+    screen:expect([[
+      {13:········ｔｅｍａ ｔｉｓ ｒｏｌｏｄ ｍｕｓｐｉ ｍｅｒｏＬ :senil 2  -^-+}|
+                            ｔｅｍａ ｔｉｓ ｒｏｌｏｄ ｍｕｓｐｉ ｍｅｒｏＬ|
+      {1:                                                                     ~}|*2
+                                                                            |
     ]])
   end)
 end)

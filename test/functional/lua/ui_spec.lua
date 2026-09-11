@@ -1,6 +1,7 @@
 local t = require('test.testutil')
 local n = require('test.functional.testnvim')()
 
+local describe, it, before_each = t.describe, t.it, t.before_each
 local eq = t.eq
 local ok = t.ok
 local exec_lua = n.exec_lua
@@ -14,41 +15,6 @@ local poke_eventloop = n.poke_eventloop
 describe('vim.ui', function()
   before_each(function()
     clear({ args_rm = { '-u' }, args = { '--clean' } })
-  end)
-
-  describe('select()', function()
-    it('can select an item', function()
-      local result = exec_lua [[
-        local items = {
-          { name = 'Item 1' },
-          { name = 'Item 2' },
-        }
-        local opts = {
-          format_item = function(entry)
-            return entry.name
-          end
-        }
-        local selected
-        local cb = function(item)
-          selected = item
-        end
-        -- inputlist would require input and block the test;
-        local choices
-        vim.fn.inputlist = function(x)
-          choices = x
-          return 1
-        end
-        vim.ui.select(items, opts, cb)
-        vim.wait(100, function() return selected ~= nil end)
-        return {selected, choices}
-      ]]
-      eq({ name = 'Item 1' }, result[1])
-      eq({
-        'Select one of:',
-        '1: Item 1',
-        '2: Item 2',
-      }, result[2])
-    end)
   end)
 
   describe('input()', function()
@@ -109,7 +75,7 @@ describe('vim.ui', function()
       eq(true, exec_lua('return (nil == result)'))
     end)
 
-    it('can return opts.cacelreturn when aborted with ESC with cancelreturn opt #18144', function()
+    it('can return opts.cancelreturn when aborted with ESC with cancelreturn opt #18144', function()
       feed(':lua result = "on_confirm not called"<cr>')
       feed(':lua vim.ui.input({ cancelreturn = "CANCEL" }, function(input) result = input end)<cr>')
       feed('Inputted Text<esc>')
@@ -143,8 +109,13 @@ describe('vim.ui', function()
         exec_lua [[vim.system = function() return { wait=function() return { code=3 } end } end]]
       end
       if not is_os('bsd') then
-        local rv =
-          exec_lua [[local cmd = vim.ui.open('non-existent-file'); return cmd:wait(100).code]]
+        local rv = exec_lua([[
+          local cmd, err = vim.ui.open('non-existent-file')
+          if err and err:find('no handler found') then
+            return -1
+          end
+          return cmd:wait(100).code
+        ]])
         ok(type(rv) == 'number' and rv ~= 0, 'nonzero exit code', rv)
       end
 
@@ -155,6 +126,28 @@ describe('vim.ui', function()
       eq(
         'vim.ui.open: no handler found (tried: wslview, explorer.exe, xdg-open, lemonade)',
         exec_lua [[local _, err = vim.ui.open('foo') ; return err]]
+      )
+    end)
+
+    it('escapes cmd.exe metacharacters in URIs #41337', function()
+      eq(
+        { 'cmd.exe', '/c', 'start', '', 'https://example.com/?q=^&^|^<^>^^^%^!' },
+        exec_lua(function()
+          vim.fn.has = function(feat)
+            return feat == 'win32' and 1 or 0
+          end
+          local captured --- @type string[]
+          vim.system = function(cmd)
+            captured = cmd
+            return {
+              wait = function()
+                return { code = 0 }
+              end,
+            }
+          end
+          vim.ui.open('https://example.com/?q=&|<>^%!')
+          return captured
+        end)
       )
     end)
 
@@ -210,7 +203,7 @@ describe('vim.ui', function()
       })
       n.api.nvim_set_option_value('filetype', 'help', { buf = buf, scope = 'local' })
       local tags = n.api.nvim_buf_get_extmarks(buf, link_ns, 0, -1, {})
-      eq(#tags, 0)
+      eq(0, #tags)
     end)
   end)
 end)

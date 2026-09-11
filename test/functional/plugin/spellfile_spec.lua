@@ -1,12 +1,14 @@
 local n = require('test.functional.testnvim')()
 local t = require('test.testutil')
 
+local describe, it, before_each, after_each = t.describe, t.it, t.before_each, t.after_each
 local eq = t.eq
+local neq = t.neq
 local exec_lua = n.exec_lua
 
 describe('nvim.spellfile', function()
-  local data_root = 'Xtest_data'
-  local rtp_dir = 'Xtest_rtp'
+  local data_root = 'Xtest_data_spellfile'
+  local rtp_dir = 'Xtest_rtp_spellfile'
 
   before_each(function()
     n.clear()
@@ -40,9 +42,12 @@ describe('nvim.spellfile', function()
       vim.fn.input = function() prompted = true; return 'n' end
 
       local requests = 0
-      vim.net.request = function(...) requests = requests + 1 end
+      vim.net.request = function(_, _, cb)
+        requests = requests + 1
+        cb()
+      end
 
-      s.load_file('en_gb')
+      s.get('en_gb')
 
       return { prompted = prompted, requests = requests }
     ]],
@@ -88,7 +93,7 @@ describe('nvim.spellfile', function()
           end
         end
 
-        s.load_file('en_gb')
+        s.get('en_gb')
 
         local spl = vim.fs.joinpath(data_root, 'site/spell/en_gb.utf-8.spl')
         local sug = vim.fs.joinpath(data_root, 'site/spell/en_gb.utf-8.sug')
@@ -136,7 +141,7 @@ describe('nvim.spellfile', function()
 
       vim.net.request = function(_, _, cb) cb(nil, { status = 404 }) end
 
-      local info = s.load_file('zz')
+      local info = s.get('zz')
       local done = s._done[info.key] == true
 
       return { warns = warns, done = done, did_reload = did_reload }
@@ -147,5 +152,36 @@ describe('nvim.spellfile', function()
     eq(1, out.warns)
     eq(true, out.done)
     eq(false, out.did_reload)
+  end)
+
+  it('no confirmation when using confirm = false', function()
+    local out = exec_lua(
+      [[
+      local rtp_dir = ...
+      local s = require('nvim.spellfile')
+
+      vim.fn.input = function(...)
+        error('prompt was triggered')
+        return 'n'
+      end
+
+      local requests = 0
+      vim.net.request = function(_, _, cb)
+        requests = requests + 1
+        cb()
+      end
+
+      s.config({ confirm = false })
+      s.get('en_gb')
+
+      -- Reset value
+      s.config({ confirm = true })
+
+      return { requests = requests }
+    ]],
+      rtp_dir
+    )
+
+    neq(0, out.requests)
   end)
 end)

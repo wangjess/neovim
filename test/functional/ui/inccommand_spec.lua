@@ -2,6 +2,7 @@ local t = require('test.testutil')
 local n = require('test.functional.testnvim')()
 local Screen = require('test.functional.ui.screen')
 
+local describe, it, before_each = t.describe, t.it, t.before_each
 local clear = n.clear
 local command = n.command
 local eq = t.eq
@@ -11,7 +12,7 @@ local feed = n.feed
 local insert = n.insert
 local fn = n.fn
 local api = n.api
-local neq = t.neq
+local matches = t.matches
 local ok = t.ok
 local retry = t.retry
 local source = n.source
@@ -638,7 +639,7 @@ describe(":substitute, 'inccommand' preserves undo", function()
       if case == 'split' then
         screen:expect([[
           Inc substitution on |
-          two line^s           |
+          ^two lines           |
                               |
           {1:~                   }|*6
           Already ...t change |
@@ -646,7 +647,7 @@ describe(":substitute, 'inccommand' preserves undo", function()
       else
         screen:expect([[
           Inc substitution on |
-          two line^s           |
+          ^two lines           |
                               |
           {1:~                   }|*6
           Already ...t change |
@@ -1135,6 +1136,24 @@ describe(':substitute, inccommand=split', function()
       :%s/B.*N/x^                    |
     ]])
 
+    -- Assert that 'inccommand' is again ENABLED after leaving cmdline mode.
+    feed([[<C-\><C-N>]])
+    eq('split', eval('&inccommand'))
+  end)
+
+  it('time limit is enforced while matching a single line #40773', function()
+    -- prevent redraws from 'incsearch'
+    api.nvim_set_option_value('incsearch', false, {})
+    -- Assert that 'inccommand' is ENABLED initially.
+    eq('split', eval('&inccommand'))
+    -- Set 'redrawtime' to minimal value, to ensure timeout is triggered.
+    command('set redrawtime=1 nowrap')
+    -- Prepare the text
+    api.nvim_buf_set_lines(0, 0, -1, true, { ('aaaaaaaa/'):rep(6) .. ('b'):rep(200) })
+    feed([[:%s/.\+\/\(.\+\)\+ft\/\1]])
+    screen:expect({ any = vim.pesc([[:%s/.\+\/\(.\+\)\+ft\/\1]]) })
+    -- Assert that 'inccommand' is DISABLED in cmdline mode.
+    eq('', eval('&inccommand'))
     -- Assert that 'inccommand' is again ENABLED after leaving cmdline mode.
     feed([[<C-\><C-N>]])
     eq('split', eval('&inccommand'))
@@ -1633,12 +1652,12 @@ describe("'inccommand' and :cnoremap", function()
       refresh(case, true)
       command("cnoremap <expr> x execute('bwipeout!')[-1].'x'")
 
-      feed(':%s/tw/tox<enter>')
-      screen:expect { any = [[{9:^E565:]] }
-      feed('<c-c>')
-
+      api.nvim_set_vvar('errmsg', '')
+      feed(':%s/tw/tox')
       -- error thrown b/c of the mapping
-      neq(nil, eval('v:errmsg'):find('^E565:'))
+      matches('^E565:', api.nvim_get_vvar('errmsg'))
+
+      feed('<enter>')
       expect([[
       Inc substitution on
       toxo lines
@@ -2544,7 +2563,7 @@ describe(':substitute', function()
 end)
 
 it(':substitute with inccommand during :terminal activity', function()
-  if t.skip_fragile(pending) then
+  if t.skip_fragile(t.pending) then
     return
   end
   retry(2, 40000, function()

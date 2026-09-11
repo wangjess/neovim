@@ -3,6 +3,8 @@
 local t = require('test.testutil')
 local n = require('test.functional.testnvim')()
 
+local describe, it, before_each, setup, teardown =
+  t.describe, t.it, t.before_each, t.setup, t.teardown
 local exec_lua = n.exec_lua
 local command = n.command
 local eq = t.eq
@@ -25,18 +27,18 @@ local function lua_includeexpr(module)
 end
 
 describe("ftplugin: Lua 'includeexpr'", function()
-  local repo_root = ''
+  local repo_root = vim.fs.normalize(t.paths.test_source_path)
   local temp_dir = ''
 
   setup(function()
-    repo_root = vim.fs.normalize(assert(vim.uv.cwd()))
     temp_dir = t.tmpname(false)
     n.clear()
+    n.api.nvim_set_current_dir(repo_root)
   end)
 
   teardown(function()
     n.expect_exit(n.command, 'qall!')
-    n.rmdir('runtime/lua/foo/')
+    n.rmdir(repo_root .. '/runtime/lua/foo/')
   end)
 
   before_each(function()

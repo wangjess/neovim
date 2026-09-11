@@ -24,31 +24,61 @@ end
 M.create_tcp_echo_server = function()
   --- Create a TCP server that echos the first message it receives.
   --- @param host string
-  ---@return uv.uv_tcp_t
-  ---@return integer
-  ---@return fun():string|nil
+  --- @return integer
   function _G._create_tcp_server(host)
     local uv = vim.uv
     local server = assert(uv.new_tcp())
-    local init = nil
+    local on_read = require('vim.lsp.rpc').create_read_loop(
+      function(body)
+        vim.rpcnotify(1, 'body', body)
+      end,
+      nil,
+      function(err, code)
+        vim.rpcnotify(1, 'error', err, code)
+      end
+    )
     server:bind(host, 0)
-    server:listen(127, function(err)
-      assert(not err, err)
+    server:listen(127, function(e)
+      assert(not e, e)
       local socket = assert(uv.new_tcp())
       server:accept(socket)
-      socket:read_start(require('vim.lsp.rpc').create_read_loop(function(body)
-        init = body
+      socket:read_start(function(err, chunk)
+        on_read(err, chunk)
+        socket:shutdown()
         socket:close()
-      end))
+        server:shutdown()
+        server:close()
+      end)
     end)
-    local port = server:getsockname().port
-    return server, port, function()
-      return init
-    end
+    return server:getsockname().port
+  end
+  function _G._send_msg_to_server(msg)
+    local port = _G._create_tcp_server('127.0.0.1')
+    local client = assert(vim.uv.new_tcp())
+    client:connect('127.0.0.1', port, function()
+      client:write(msg, function()
+        client:shutdown()
+        client:close()
+      end)
+    end)
   end
 end
 
 M.create_server_definition = function()
+  ---@class test.functional.plugin.lsp.testutil._create_server.Opts
+  ---@field capabilities lsp.ServerCapabilities?
+  ---@field handlers table<vim.lsp.protocol.Method.ClientToServer.Request, fun(method: vim.lsp.protocol.Method.ClientToServer.Request, params: table?, callback: fun(err?: lsp.ResponseError, result: any))>?
+
+  ---@class test.functional.plugin.lsp.testutil._create_server.Message
+  ---@field method vim.lsp.protocol.Method.ClientToServer
+  ---@field params table?
+
+  ---@class test.functional.plugin.lsp.testutil._create_server.Server
+  ---@field messages test.functional.plugin.lsp.testutil._create_server.Message[]
+  ---@field cmd fun(dispatchers: vim.lsp.rpc.Dispatchers, config: vim.lsp.ClientConfig): vim.lsp.rpc.Client
+
+  ---@param opts test.functional.plugin.lsp.testutil._create_server.Opts?
+  ---@return test.functional.plugin.lsp.testutil._create_server.Server
   function _G._create_server(opts)
     opts = opts or {}
     local server = {}
@@ -86,6 +116,7 @@ M.create_server_definition = function()
         if method == 'exit' then
           dispatchers.on_exit(0, 15)
         end
+        return true
       end
 
       function srv.is_closing()
@@ -94,6 +125,7 @@ M.create_server_definition = function()
 
       function srv.terminate()
         closing = true
+        dispatchers.on_exit(0, 15)
       end
 
       return srv

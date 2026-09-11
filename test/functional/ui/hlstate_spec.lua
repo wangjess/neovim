@@ -3,6 +3,7 @@ local n = require('test.functional.testnvim')()
 local Screen = require('test.functional.ui.screen')
 local tt = require('test.functional.testterm')
 
+local describe, it, before_each = t.describe, t.it, t.before_each
 local clear, insert = n.clear, n.insert
 local command = n.command
 local api = n.api
@@ -227,8 +228,7 @@ describe('ext_hlstate detailed highlights', function()
     command(("enew | call jobstart(['%s'],{'term':v:true})"):format(testprg('tty-test')))
     screen:expect([[
       ^tty ready                               |
-                                              |
-                                              |*5
+                                              |*6
       {7:                                        }|
     ]])
 
@@ -242,16 +242,14 @@ describe('ext_hlstate detailed highlights', function()
       screen:expect([[
         ^tty ready                               |
         x {5:y z}                                   |
-                                                |
-                                                |*4
+                                                |*5
         {7:                                        }|
       ]])
     else
       screen:expect([[
         ^tty ready                               |
         x {2:y }{3:z}                                   |
-                                                |
-                                                |*4
+                                                |*5
         {7:                                        }|
       ]])
     end

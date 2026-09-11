@@ -1,6 +1,7 @@
 local t = require('test.testutil')
 local n = require('test.functional.testnvim')()
 
+local describe, it, before_each = t.describe, t.it, t.before_each
 local clear, eq, assert_alive = n.clear, t.eq, n.assert_alive
 local command = n.command
 local api = n.api
@@ -20,8 +21,8 @@ describe('sign', function()
         command('sign place 34 line=3 name=Foo buffer=' .. buf2)
         -- now unplace without specifying a buffer
         command('sign unplace 34')
-        eq('--- Signs ---\n', api.nvim_exec('sign place buffer=' .. buf1, true))
-        eq('--- Signs ---\n', api.nvim_exec('sign place buffer=' .. buf2, true))
+        eq('--- Signs ---', api.nvim_exec('sign place buffer=' .. buf1, true))
+        eq('--- Signs ---', api.nvim_exec('sign place buffer=' .. buf2, true))
       end)
     end)
   end)

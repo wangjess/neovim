@@ -74,10 +74,11 @@ static Object typval_cbuf_to_obj(EncodedData *edata, const char *data, size_t le
     kvi_push(edata->stack, typval_cbuf_to_obj(edata, len_ ? blob_->bv_ga.ga_data : "", len_)); \
   } while (0)
 
-#define TYPVAL_ENCODE_CONV_FUNC_START(tv, fun) \
+#define TYPVAL_ENCODE_CONV_FUNC_START(tv, fun, prefix) \
   do { \
-    ufunc_T *fp = find_func(fun); \
-    if (fp != NULL && (fp->uf_flags & FC_LUAREF)) { \
+    const char *const fun_ = (fun); \
+    ufunc_T *fp; \
+    if (fun_ != NULL && (fp = find_func(fun_)) != NULL && fp->uf_flags & FC_LUAREF) { \
       kvi_push(edata->stack, LUAREF_OBJ(api_new_luaref(fp->uf_luaref))); \
     } else { \
       TYPVAL_ENCODE_CONV_NIL(tv); \
@@ -277,6 +278,7 @@ void object_to_vim_take_luaref(Object *obj, typval_T *tv, bool take_luaref, Erro
   tv->v_lock = VAR_UNLOCKED;
 
   switch (obj->type) {
+  case kObjectTypeUnset:
   case kObjectTypeNil:
     tv->v_type = VAR_SPECIAL;
     tv->vval.v_special = kSpecialVarNull;

@@ -2,6 +2,7 @@ local t = require('test.testutil')
 local n = require('test.functional.testnvim')()
 local tt = require('test.functional.testterm')
 
+local describe, it, after_each = t.describe, t.it, t.after_each
 local assert_log = t.assert_log
 local clear = n.clear
 local command = n.command
@@ -98,5 +99,25 @@ describe('log', function()
 
     -- Child Nvim spawned by jobstart() prepends "c/" to parent name.
     assert_log('c/' .. tid .. '%.%d+%.%d +server_init:%d+: test log message', testlog, 100)
+  end)
+
+  it('warns when $NVIM_LOG_FILE is inaccessible', function()
+    clear({
+      args_rm = { '-u' },
+      args = { '--clean' },
+      env = { NVIM_LOG_FILE = '/foo/bar' },
+    })
+    t.retry(nil, nil, function()
+      t.matches('log: "/foo/bar" not accessible, logging to', n.exec_capture('messages'))
+    end)
+
+    clear({
+      args_rm = { '-u' },
+      args = { '--clean' },
+      env = { NVIM_LOG_FILE = '/foo/bar', XDG_STATE_HOME = '/foo2/bar2' },
+    })
+    t.retry(nil, nil, function()
+      t.matches('log: "/foo/bar" not accessible, logging to', n.exec_capture('messages'))
+    end)
   end)
 end)

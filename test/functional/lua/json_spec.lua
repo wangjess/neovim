@@ -1,6 +1,7 @@
 local t = require('test.testutil')
 local n = require('test.functional.testnvim')()
 
+local describe, it, before_each = t.describe, t.it, t.before_each
 local clear = n.clear
 local exec_lua = n.exec_lua
 local eq = t.eq
@@ -145,6 +146,45 @@ describe('vim.json.decode()', function()
       ' \t\n\r \t\r\n \n\t\r \n\r\t \r\t\n \r\n\t\t \n\r\t \r\n\t\n \r\t\n\r \t\r \n\t\r\n \n \t\r\n \r\t\n\t \r\n\t\r \n\r \t\n\r\t \r \t\n\r \n\t\r\t \n\r\t\n \r\n \t\r\n\t'
     local str = ('%s{%s"key"%s:%s[%s"val"%s,%s"val2"%s]%s,%s"key2"%s:%s1%s}%s'):gsub('%%s', s)
     eq({ key = { 'val', 'val2' }, key2 = 1 }, exec_lua([[return vim.json.decode(...)]], str))
+  end)
+
+  it('skip_comments', function()
+    eq({}, exec_lua([[return vim.json.decode('{//comment\n}', { skip_comments = true })]]))
+    eq({}, exec_lua([[return vim.json.decode('{//comment\r\n}', { skip_comments = true })]]))
+    eq(
+      'test // /* */ string',
+      exec_lua(
+        [[return vim.json.decode('"test // /* */ string"//comment', { skip_comments = true })]]
+      )
+    )
+    eq(
+      {},
+      exec_lua([[return vim.json.decode('{/* A multi-line\ncomment*/}', { skip_comments = true })]])
+    )
+    eq(
+      { a = 1 },
+      exec_lua([[return vim.json.decode('{"a" /* Comment */: 1}', { skip_comments = true })]])
+    )
+    eq(
+      { a = 1 },
+      exec_lua([[return vim.json.decode('{"a": /* Comment */ 1}', { skip_comments = true })]])
+    )
+    eq({}, exec_lua([[return vim.json.decode('/*first*//*second*/{}', { skip_comments = true })]]))
+    eq(
+      'Expected the end but found unclosed multi-line comment at character 13',
+      pcall_err(exec_lua, [[return vim.json.decode('{}/*Unclosed', { skip_comments = true })]])
+    )
+    eq(
+      'Expected comma or object end but found T_INTEGER at character 12',
+      pcall_err(exec_lua, [[return vim.json.decode('{"a":1/*x*/0}', { skip_comments = true })]])
+    )
+  end)
+
+  it('gives nice error message when attempting to index into null value', function()
+    exec_lua [[ parsed = vim.json.decode('{"foo": null}') ]]
+
+    eq('attempt to index vim.NIL', pcall_err(exec_lua, [[ return parsed.foo.sub_field ]]))
+    eq('attempt to index vim.NIL', pcall_err(exec_lua, [[ parsed.foo.new_field = 3 ]]))
   end)
 end)
 

@@ -102,6 +102,7 @@
 ///
 /// @param  tv  Pointer to typval where value is stored. May not be NULL.
 /// @param  fun  Function name. May be NULL.
+/// @param  prefix  Prefix for converting to a string.
 
 /// @def TYPVAL_ENCODE_CONV_FUNC_BEFORE_ARGS
 /// @brief Macros used before starting to convert partial arguments
@@ -344,15 +345,19 @@ static int TYPVAL_ENCODE_CONVERT_ONE_VALUE(
                             tv_blob_len(tv->vval.v_blob));
     break;
   case VAR_FUNC:
-    TYPVAL_ENCODE_CONV_FUNC_START(tv, tv->vval.v_string);
+    TYPVAL_ENCODE_CONV_FUNC_START(tv, tv->vval.v_string, "");
     TYPVAL_ENCODE_CONV_FUNC_BEFORE_ARGS(tv, 0);
     TYPVAL_ENCODE_CONV_FUNC_BEFORE_SELF(tv, -1);
     TYPVAL_ENCODE_CONV_FUNC_END(tv);
     break;
   case VAR_PARTIAL: {
     partial_T *const pt = tv->vval.v_partial;
-    (void)pt;
-    TYPVAL_ENCODE_CONV_FUNC_START(tv, (pt == NULL ? NULL : partial_name(pt)));
+    char *const fun = pt == NULL ? NULL : partial_name(pt);
+    // When using uf_name prepend "g:" for a global function.
+    const char *const prefix = fun != NULL && pt != NULL && pt->pt_name == NULL
+                               && ASCII_ISUPPER(fun[0]) ? "g:" : "";
+    (void)prefix;
+    TYPVAL_ENCODE_CONV_FUNC_START(tv, fun, prefix);
     kvi_push(*mpstack, ((MPConvStackVal) {
         .type = kMPConvPartial,
         .tv = tv,
@@ -415,11 +420,9 @@ static int TYPVAL_ENCODE_CONVERT_ONE_VALUE(
     const dictitem_T *val_di;
     if (TYPVAL_ENCODE_ALLOW_SPECIALS
         && tv->vval.v_dict->dv_hashtab.ht_used == 2
-        && (type_di = tv_dict_find((dict_T *)tv->vval.v_dict,
-                                   S_LEN("_TYPE"))) != NULL
+        && (type_di = tv_dict_find(tv->vval.v_dict, S_LEN("_TYPE"))) != NULL
         && type_di->di_tv.v_type == VAR_LIST
-        && (val_di = tv_dict_find((dict_T *)tv->vval.v_dict,
-                                  S_LEN("_VAL"))) != NULL) {
+        && (val_di = tv_dict_find(tv->vval.v_dict, S_LEN("_VAL"))) != NULL) {
       size_t i;
       for (i = 0; i < ARRAY_SIZE(eval_msgpack_type_lists); i++) {
         if (type_di->di_tv.vval.v_list == eval_msgpack_type_lists[i]) {
@@ -485,8 +488,8 @@ static int TYPVAL_ENCODE_CONVERT_ONE_VALUE(
           goto _convert_one_value_regular_dict;
         }
 
-        const uint64_t number = ((uint64_t)(((uint64_t)highest_bits) << 62)
-                                 | (uint64_t)(((uint64_t)high_bits) << 31)
+        const uint64_t number = ((((uint64_t)highest_bits) << 62)
+                                 | (((uint64_t)high_bits) << 31)
                                  | (uint64_t)low_bits);
         if (sign > 0) {
           TYPVAL_ENCODE_CONV_UNSIGNED_NUMBER(tv, number);

@@ -16,7 +16,6 @@
 #include "nvim/buffer_defs.h"
 #include "nvim/buffer_updates.h"
 #include "nvim/channel.h"
-#include "nvim/context.h"
 #include "nvim/decoration_provider.h"
 #include "nvim/drawline.h"
 #include "nvim/errors.h"
@@ -25,14 +24,17 @@
 #include "nvim/globals.h"
 #include "nvim/highlight.h"
 #include "nvim/highlight_group.h"
+#include "nvim/input_cmdatom.h"
 #include "nvim/insexpand.h"
 #include "nvim/lua/executor.h"
 #include "nvim/main.h"
 #include "nvim/map_defs.h"
 #include "nvim/mapping.h"
+#include "nvim/mcursor.h"
 #include "nvim/memfile.h"
 #include "nvim/memory.h"
 #include "nvim/message.h"
+#include "nvim/normal.h"
 #include "nvim/option_vars.h"
 #include "nvim/sign.h"
 #include "nvim/state_defs.h"
@@ -273,8 +275,8 @@ size_t xstrnlen(const char *s, size_t n)
 char *xstrchrnul(const char *str, char c)
   FUNC_ATTR_NONNULL_RET FUNC_ATTR_NONNULL_ALL FUNC_ATTR_PURE
 {
-  char *p = strchr(str, c);
-  return p ? p : (char *)(str + strlen(str));
+  const char *p = strchr(str, c);
+  return p ? (char *)p : (char *)(str + strlen(str));
 }
 
 /// A version of memchr() that returns a pointer one past the end
@@ -288,8 +290,8 @@ char *xstrchrnul(const char *str, char c)
 void *xmemscan(const void *addr, char c, size_t size)
   FUNC_ATTR_NONNULL_RET FUNC_ATTR_NONNULL_ALL FUNC_ATTR_PURE
 {
-  char *p = memchr(addr, c, size);
-  return p ? p : (char *)addr + size;
+  const char *p = memchr(addr, c, size);
+  return p ? (char *)p : (char *)addr + size;
 }
 
 /// Replaces every instance of `c` with `x`.
@@ -524,7 +526,7 @@ char *xstrndup(const char *str, size_t len)
   FUNC_ATTR_MALLOC FUNC_ATTR_WARN_UNUSED_RESULT FUNC_ATTR_NONNULL_RET
   FUNC_ATTR_NONNULL_ALL
 {
-  char *p = memchr(str, NUL, len);
+  const char *p = memchr(str, NUL, len);
   return xmemdupz(str, p ? (size_t)(p - str) : len);
 }
 
@@ -826,18 +828,18 @@ char *arena_strdup(Arena *arena, const char *str)
   return arena_memdupz(arena, str, strlen(str));
 }
 
-#if defined(EXITFREE)
+#ifdef EXITFREE
 
 # include "nvim/autocmd.h"
 # include "nvim/buffer.h"
 # include "nvim/cmdhist.h"
 # include "nvim/diff.h"
-# include "nvim/edit.h"
 # include "nvim/ex_cmds.h"
 # include "nvim/ex_docmd.h"
 # include "nvim/file_search.h"
-# include "nvim/getchar.h"
 # include "nvim/grid.h"
+# include "nvim/input.h"
+# include "nvim/insert.h"
 # include "nvim/mark.h"
 # include "nvim/msgpack_rpc/channel.h"
 # include "nvim/option.h"
@@ -859,9 +861,10 @@ void free_all_mem(void)
 {
   buf_T *buf, *nextbuf;
 
-  // When we cause a crash here it is caught and Vim tries to exit cleanly.
-  // Don't try freeing everything again.
+  // If a routine below recurses into free_all_mem, don't try freeing everything again.
   if (entered_free_all_mem) {
+    // Except the Lua state. #39675
+    nlua_free_all_mem();
     return;
   }
   entered_free_all_mem = true;
@@ -950,20 +953,21 @@ void free_all_mem(void)
     bufref_T bufref;
     set_bufref(&bufref, buf);
     nextbuf = buf->b_next;
+    // All windows were freed.  Reset b_nwindows so buffers can be wiped.
+    buf->b_nwindows = 0;
 
     // Since options (in addition to other stuff) have been freed above we need to ensure no
     // callbacks are called, so free them before closing the buffer.
     buf_free_callbacks(buf);
 
-    close_buffer(NULL, buf, DOBUF_WIPE, false, false);
+    close_buffer(NULL, buf, DOBUF_WIPE, false, false, false);
     // Didn't work, try next one.
     buf = bufref_valid(&bufref) ? nextbuf : firstbuf;
   }
 
   // Clear registers.
   clear_registers();
-  ResetRedobuff();
-  ResetRedobuff();
+  redo_free_all();
 
   // highlight info
   free_highlight();
@@ -981,7 +985,8 @@ void free_all_mem(void)
   channel_free_all_mem();
   eval_clear();
   api_extmark_free_all_mem();
-  ctx_free_all();
+  atom_free_all();
+  mc_free_all();
 
   map_destroy(int, &buffer_handles);
   map_destroy(int, &window_handles);
@@ -1008,6 +1013,7 @@ void free_all_mem(void)
   ui_comp_free_all_mem();
   nlua_free_all_mem();
   rpc_free_all_mem();
+  autocmd_free_all_mem();
 
   // should be last, in case earlier free functions deallocates arenas
   arena_free_reuse_blks();

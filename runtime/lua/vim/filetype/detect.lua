@@ -18,6 +18,7 @@
 --     `if line =~ '^\s*unwind_protect\>'` => `if matchregex(line, [[\c^\s*unwind_protect\>]])`
 
 local fn = vim.fn
+local fs = vim.fs
 
 local M = {}
 
@@ -29,6 +30,97 @@ local matchregex = vim.filetype._matchregex
 
 -- luacheck: push no unused args
 -- luacheck: push ignore 122
+
+-- AL (Microsoft Dynamics 365 Business Central) or Perl AutoLoader
+--- @type vim.filetype.mapfn
+function M.al(_, bufnr)
+  if vim.g.filetype_al then
+    return vim.g.filetype_al
+  end
+  -- AL sources declare an object as "<kind> <id> <name>" at the start of a
+  -- line, optionally preceded by namespace and using declarations.  Perl
+  -- AutoLoader chunks match neither.  Matching a bare keyword anywhere would
+  -- be wrong: table, page and report are ordinary English words, so the object
+  -- name must follow.  The match is case sensitive because AL tooling emits
+  -- lowercase keywords, while prose in Perl comments is usually capitalised.
+  for _, line in ipairs(getlines(bufnr, 1, 200)) do
+    if
+      matchregex(
+        line,
+        [[^\s*\%(codeunit\|page\|pageextension\|pagecustomization\|table\|tableextension\|]]
+          .. [[report\|reportextension\|xmlport\|query\|enum\|enumextension\|profile\|profileextension\|]]
+          .. [[controladdin\|interface\|permissionset\|permissionsetextension\|entitlement\)\>\s\+\%(\d\|"\|\u\)]]
+      )
+      or findany(
+        line,
+        { '^%s*dotnet%s*$', '^%s*namespace%s+[%w._]+%s*;', '^%s*using%s+[%w._]+%s*;' }
+      )
+    then
+      return 'al'
+    end
+  end
+  return 'perl'
+end
+
+-- Erlang Application Resource Files (*.app.src is matched by extension)
+-- See: https://erlang.org/doc/system/applications
+--- @type vim.filetype.mapfn
+function M.app(path, bufnr)
+  if vim.g.filetype_app then
+    return vim.g.filetype_app
+  end
+  for lnum, line in ipairs(getlines(bufnr, 1, 100)) do
+    -- skip Erlang comments, might be something else
+    if not findany(line, { '^%s*%%', '^%s*$' }) then
+      if line:find('^%s*{') then
+        local name = fn.fnamemodify(path, ':t:r:r')
+        local lines = vim
+          .iter(getlines(bufnr, lnum, lnum + 9))
+          :filter(function(v)
+            return not v:find('^%s*%%')
+          end)
+          :join(' ')
+        if
+          findany(lines, {
+            [[^%s*{%s*application%s*,%s*']] .. name .. [['%s*,]],
+            [[^%s*{%s*application%s*,%s*]] .. name .. [[%s*,]],
+          })
+        then
+          return 'erlang'
+        end
+      end
+      return
+    end
+  end
+end
+
+-- This function checks for Kawasaki robots AS file or atlas file type.
+--- @type vim.filetype.mapfn
+function M.as(_, bufnr)
+  if vim.g.filetype_as then
+    return vim.g.filetype_as
+  end
+  for _, line in ipairs(getlines(bufnr, 1, 30)) do
+    if line:find('^%.NETCONF') then
+      return 'kawasaki_as'
+    end
+  end
+  return 'atlas'
+end
+
+--- @param bufnr integer
+--- @return boolean
+local function is_objectscript_routime(bufnr)
+  local line1 = getline(bufnr, 1)
+  line1 = fn.substitute(line1, [[^\ufeff]], '', '')
+  if matchregex(line1, [[\c^\s*routine\>]]) then
+    return true
+  end
+  if matchregex(line1, [[\c\<iris\>]]) then
+    return true
+  end
+  return table.concat(getlines(bufnr, 1, 3), ''):find('%%RO') ~= nil
+end
 
 -- This function checks for the kind of assembly that is wanted by the user, or
 -- can be detected from the beginning of the file.
@@ -49,6 +141,17 @@ function M.asm(path, bufnr)
   end
   return syntax, function(b)
     vim.b[b].asmsyntax = syntax
+  end
+end
+
+--- @type vim.filetype.mapfn
+function M.mac(path, bufnr)
+  if vim.g.filetype_mac then
+    return vim.g.filetype_mac
+  elseif is_objectscript_routime(bufnr) then
+    return 'objectscript_routine'
+  else
+    return M.asm(path, bufnr)
   end
 end
 
@@ -76,7 +179,7 @@ function M.asm_syntax(_, bufnr)
       return 'masm'
     elseif
       line:find('Texas Instruments Incorporated')
-      -- tiasm uses `* commment`, but detection is unreliable if '/*' is seen
+      -- tiasm uses `* comment`, but detection is unreliable if '/*' is seen
       or (line:find('^%*') and not is_slash_star_encountered)
     then
       return 'tiasm'
@@ -219,6 +322,7 @@ function M.class(_, bufnr)
   end
 end
 
+--- Determines whether a *.cls file is ObjectScript, TeX, Rexx, Visual Basic, or Smalltalk.
 --- @type vim.filetype.mapfn
 function M.cls(_, bufnr)
   if vim.g.filetype_cls then
@@ -231,8 +335,26 @@ function M.cls(_, bufnr)
     return 'vb'
   end
 
-  local nonblank1 = nextnonblank(bufnr, 1)
-  if nonblank1 and nonblank1:find('^[%%\\]') then
+  local nonblank1, lnum = nextnonblank(bufnr, 1)
+  local line = nonblank1
+  while line do
+    if matchregex(line, [[\c^\s*\%(import\|include\|includegenerator\)\>]]) then
+      line, lnum = nextnonblank(bufnr, lnum + 1)
+    else
+      nonblank1 = line
+      break
+    end
+  end
+
+  if
+    nonblank1
+    and matchregex(
+      nonblank1,
+      [[\c^\s*class\>\s\+[%A-Za-z][%A-Za-z0-9_.]*\%(\s\+extends\>\|\s*\[\|\s*{\|$\)]]
+    )
+  then
+    return 'objectscript'
+  elseif nonblank1 and nonblank1:find('^[%%\\]') then
     return 'tex'
   elseif nonblank1 and findany(nonblank1, { '^%s*/%*', '^%s*::%w' }) then
     return 'rexx'
@@ -260,7 +382,7 @@ end
 
 --- @type vim.filetype.mapfn
 function M.conf(path, bufnr)
-  if fn.did_filetype() ~= 0 or path:find(vim.g.ft_ignore_pat) then
+  if fn.did_filetype() ~= 0 or (vim.g.ft_ignore_pat and path:find(vim.g.ft_ignore_pat)) then
     return
   end
   if path:find('%.conf$') then
@@ -363,7 +485,7 @@ end
 
 --- @type vim.filetype.mapfn
 function M.dat(path, bufnr)
-  local file_name = fn.fnamemodify(path, ':t'):lower()
+  local file_name = fs.basename(path):lower()
   -- Innovation data processing
   if findany(file_name, { '^upstream%.dat$', '^upstream%..*%.dat$', '^.*%.upstream%.dat$' }) then
     return 'upstreamdat'
@@ -391,7 +513,7 @@ end
 -- to non-dep3patch files, such as README and other text files.
 --- @type vim.filetype.mapfn
 function M.dep3patch(path, bufnr)
-  local file_name = fn.fnamemodify(path, ':t')
+  local file_name = fs.basename(path)
   if file_name == 'series' then
     return
   end
@@ -530,7 +652,7 @@ function M.dsp(path, bufnr)
   end
 
   -- Test the filename
-  local file_name = fn.fnamemodify(path, ':t')
+  local file_name = fs.basename(path)
   if file_name:find('^[mM]akefile.*$') then
     return 'make'
   end
@@ -741,7 +863,7 @@ end
 --- @return boolean
 local function is_hare_module(dir, depth)
   depth = math.max(depth, 0)
-  for name, _ in vim.fs.dir(dir, { depth = depth + 1 }) do
+  for name, _ in fs.dir(dir, { depth = depth + 1 }) do
     if name:find('%.ha$') then
       return true
     end
@@ -752,7 +874,7 @@ end
 --- @type vim.filetype.mapfn
 function M.haredoc(path, _)
   if vim.g.filetype_haredoc then
-    if is_hare_module(vim.fs.dirname(path), vim.g.haredoc_search_depth or 1) then
+    if is_hare_module(fs.dirname(path), vim.g.haredoc_search_depth or 1) then
       return 'haredoc'
     end
   end
@@ -771,7 +893,7 @@ function M.html(_, bufnr)
     if
       matchregex(
         line,
-        [[@\(if\|for\|defer\|switch\)\|\*\(ngIf\|ngFor\|ngSwitch\|ngTemplateOutlet\)\|ng-template\|ng-content]]
+        [[@\(if\|for\|defer\|switch\)\|\*\(ngIf\|ngFor\|ngSwitch\|ngTemplateOutlet\)\|\<ng-template\|\<ng-content]]
       )
     then
       return 'htmlangular'
@@ -844,6 +966,9 @@ function M.inc(path, bufnr)
   if vim.g.filetype_inc then
     return vim.g.filetype_inc
   end
+  if is_objectscript_routime(bufnr) then
+    return 'objectscript_routine'
+  end
   for _, line in ipairs(getlines(bufnr, 1, 20)) do
     if line:lower():find('perlscript') then
       return 'aspperl'
@@ -856,7 +981,11 @@ function M.inc(path, bufnr)
     elseif findany(line, { '^%s{', '^%s%(%*' }) or matchregex(line, pascal_keywords) then
       return 'pascal'
     elseif
-      findany(line, { '^%s*inherit ', '^%s*require ', '^%s*%u[%w_:${}/]*%s+%??[?:+.]?=.? ' })
+      matchregex(line, [[^\s*\<\%(require\|inherit\)\>]])
+      or matchregex(
+        line,
+        [=[^\s*[A-Z][A-Za-z0-9_:${}/]*\%(\[[A-Za-z0-9_:/]\+\]\)*\s\+\%(??=\|[?:+.]=\|=[+.]\?\)\s\+]=]
+      )
     then
       return 'bitbake'
     end
@@ -891,6 +1020,17 @@ function M.install(path, bufnr)
     return 'php'
   end
   return M.bash(path, bufnr)
+end
+
+--- @type vim.filetype.mapfn
+function M.int(_, bufnr)
+  if vim.g.filetype_int then
+    return vim.g.filetype_int
+  elseif is_objectscript_routime(bufnr) then
+    return 'objectscript_routine'
+  else
+    return 'hex'
+  end
 end
 
 --- Innovation Data Processing
@@ -1032,8 +1172,8 @@ end
 ---  – files in POSIX M4
 --- @type vim.filetype.mapfn
 function M.m4(path, bufnr)
-  local fname = fn.fnamemodify(path, ':t')
-  path = fn.fnamemodify(path, ':p:h')
+  local fname = fs.basename(path)
+  path = fs.dirname(fs.abspath(path))
 
   if fname:find('html%.m4$') then
     return 'htmlm4'
@@ -1089,7 +1229,7 @@ function M.make(path, bufnr)
   vim.b.make_flavor = nil
 
   -- 1. filename
-  local file_name = fn.fnamemodify(path, ':t')
+  local file_name = fs.basename(path)
   if file_name == 'BSDmakefile' then
     vim.b.make_flavor = 'bsd'
     return 'make'
@@ -1155,7 +1295,7 @@ end
 --- @param path string
 --- @return string?
 function M.me(path)
-  local filename = fn.fnamemodify(path, ':t'):lower()
+  local filename = fs.basename(path):lower()
   if filename ~= 'read.me' and filename ~= 'click.me' then
     return 'nroff'
   end
@@ -1163,8 +1303,12 @@ end
 
 --- @type vim.filetype.mapfn
 function M.mm(_, bufnr)
+  if vim.g.filetype_mm then
+    return vim.g.filetype_mm
+  end
+
   for _, line in ipairs(getlines(bufnr, 1, 20)) do
-    if matchregex(line, [[\c^\s*\(#\s*\(include\|import\)\>\|@import\>\|/\*\)]]) then
+    if matchregex(line, [[\c^\s*\(//\|#\s*\(include\|import\)\>\|@import\>\|/\*\)]]) then
       return 'objcpp'
     end
   end
@@ -1265,7 +1409,7 @@ end
 --- (Slow test) If a file contains a 'use' statement then it is almost certainly a Perl file.
 --- @type vim.filetype.mapfn
 function M.perl(path, bufnr)
-  local dir_name = vim.fs.dirname(path)
+  local dir_name = fs.dirname(path)
   if fn.fnamemodify(path, '%:e') == 't' and (dir_name == 't' or dir_name == 'xt') then
     return 'perl'
   end
@@ -1497,7 +1641,7 @@ function M.rules(path)
       return 'hog'
     end
     --- @cast config_lines -string
-    local dir = fn.fnamemodify(path, ':h')
+    local dir = fs.dirname(path)
     for _, line in ipairs(config_lines) do
       local match = line:match(udev_rules_pattern)
       if match then
@@ -1594,7 +1738,7 @@ end
 --- @return string?, fun(b: integer)?
 local function sh(path, contents, name)
   -- Path may be nil, do not fail in that case
-  if fn.did_filetype() ~= 0 or (path or ''):find(vim.g.ft_ignore_pat) then
+  if fn.did_filetype() ~= 0 or (vim.g.ft_ignore_pat and (path or ''):find(vim.g.ft_ignore_pat)) then
     -- Filetype was already detected or detection should be skipped
     return
   end
@@ -1659,7 +1803,7 @@ M.tcsh = sh_with('tcsh')
 --- @param name? string
 --- @return string?
 function M.shell(path, contents, name)
-  if fn.did_filetype() ~= 0 or matchregex(path, vim.g.ft_ignore_pat) then
+  if fn.did_filetype() ~= 0 or (vim.g.ft_ignore_pat and matchregex(path, vim.g.ft_ignore_pat)) then
     -- Filetype was already detected or detection should be skipped
     return
   end
@@ -1784,12 +1928,23 @@ end
 -- Determine if a *.tf file is TF (TinyFugue) mud client or terraform
 --- @type vim.filetype.mapfn
 function M.tf(_, bufnr)
-  for _, line in ipairs(getlines(bufnr)) do
-    -- Assume terraform file on a non-empty line (not whitespace-only)
-    -- and when the first non-whitespace character is not a ; or /
-    if not line:find('^%s*$') and not line:find('^%s*[;/]') then
-      return 'terraform'
+  if vim.g.filetype_tf then
+    return vim.g.filetype_tf
+  end
+
+  local continuation = false
+  for _, line in ipairs(getlines(bufnr, 1, 100)) do
+    -- TF supports backslash line continuation, so a continued line may begin
+    -- with any character.  Only test the first character of a line that does
+    -- not continue a previous one.
+    if not continuation then
+      -- Assume terraform file on a non-empty line (not whitespace-only)
+      -- and when the first non-whitespace character is not a ; or /
+      if not line:find('^%s*$') and not line:find('^%s*[;/]') then
+        return 'terraform'
+      end
     end
+    continuation = not not line:find('\\$')
   end
   return 'tf'
 end
@@ -2008,7 +2163,9 @@ local patterns_hashbang = {
   ['^janet\\>'] = { 'janet', { vim_regex = true } },
   ['^dart\\>'] = { 'dart', { vim_regex = true } },
   ['^execlineb\\>'] = { 'execline', { vim_regex = true } },
+  ['^bpftrace\\>'] = { 'bpftrace', { vim_regex = true } },
   ['^vim\\>'] = { 'vim', { vim_regex = true } },
+  ['^ed\\>'] = { 'ed', { vim_regex = true } },
 }
 
 --- File starts with "#!".
@@ -2043,6 +2200,8 @@ local function match_from_hashbang(contents, path, dispatch_extension)
     name = fn.substitute(first_line, [[^#!.*\<env\>\s\+\(\i\+\).*]], '\\1', '')
   elseif matchregex(first_line, [[^#!\s*[^/\\ ]*\>\([^/\\]\|$\)]]) then
     name = fn.substitute(first_line, [[^#!\s*\([^/\\ ]*\>\).*]], '\\1', '')
+  elseif matchregex(first_line, [[^#!.*\<busybox\>]]) then
+    name = fn.substitute(first_line, [[^#!.*\<busybox\>\s\+\(\i\+\).*]], '\\1', '')
   else
     name = fn.substitute(first_line, [[^#!\s*\S*[/\\]\(\f\+\).*]], '\\1', '')
   end
@@ -2053,7 +2212,7 @@ local function match_from_hashbang(contents, path, dispatch_extension)
     name = 'wish'
   end
 
-  if matchregex(name, [[^\(bash\d*\|dash\|ksh\d*\|sh\)\>]]) then
+  if matchregex(name, [[^\(bash\d*\|d\?ash\|ksh\d*\|sh\)\>]]) then
     -- Bourne-like shell scripts: bash bash2 dash ksh ksh93 sh
     return sh(path, contents, first_line)
   elseif matchregex(name, [[^csh\>]]) then
@@ -2068,6 +2227,10 @@ local function match_from_hashbang(contents, path, dispatch_extension)
     if opts.vim_regex and matchregex(name, k) or name:find(k) then
       return ft
     end
+  end
+
+  if name == 'uv' and matchregex(first_line, [[\<uv run\>]]) then
+    return 'python'
   end
 
   -- If nothing matched, check the extension table. For a hashbang like

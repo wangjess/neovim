@@ -12,7 +12,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <tree_sitter/api.h>
 #include <uv.h>
 
 #include "nvim/os/time.h"
@@ -42,6 +41,10 @@
 #define TS_META_QUERY "treesitter_query"
 #define TS_META_QUERYCURSOR "treesitter_querycursor"
 #define TS_META_QUERYMATCH "treesitter_querymatch"
+
+#ifdef __EMSCRIPTEN__
+extern const TSLanguage *nvim_ts_get_parser(const char *lang);
+#endif
 
 typedef struct {
   LuaRef cb;
@@ -134,6 +137,13 @@ static int tslua_add_language_from_object(lua_State *L)
 static const TSLanguage *load_language_from_object(lua_State *L, const char *path,
                                                    const char *lang_name, const char *symbol)
 {
+#ifdef __EMSCRIPTEN__
+  const TSLanguage *static_lang = nvim_ts_get_parser(symbol);
+  if (static_lang != NULL) {
+    return static_lang;
+  }
+#endif
+
   uv_lib_t lib;
   if (uv_dlopen(path, &lib)) {
     xstrlcpy(IObuff, uv_dlerror(&lib), sizeof(IObuff));
@@ -385,7 +395,14 @@ static int tslua_push_parser(lua_State *L)
 #ifdef HAVE_WASMTIME
   if (ts_language_is_wasm(lang)) {
     assert(wasmengine != NULL);
-    ts_parser_set_wasm_store(*parser, ts_wasmstore);
+    TSWasmError werr = { 0 };
+    TSWasmStore *store = ts_wasm_store_new(wasmengine, &werr);
+    if (werr.kind != TSWasmErrorKindNone) {
+      ts_parser_delete(*parser);
+      return luaL_error(L, "Failed to create WASM store: (%s) %s",
+                        wasmerr_to_str(werr.kind), werr.message);
+    }
+    ts_parser_set_wasm_store(*parser, store);
   }
 #endif
 
@@ -400,10 +417,10 @@ static int tslua_push_parser(lua_State *L)
   return 1;
 }
 
-static TSParser *parser_check(lua_State *L, uint16_t index)
+static TSParser *parser_check(lua_State *L, int index)
 {
   TSParser **ud = luaL_checkudata(L, index, TS_META_PARSER);
-  luaL_argcheck(L, *ud, index, "TSParser expected");
+  luaL_argcheck(L, *ud != NULL, index, "Parser has been deleted");
   return *ud;
 }
 
@@ -420,9 +437,12 @@ static void logger_gc(TSLogger logger)
 
 static int parser_gc(lua_State *L)
 {
-  TSParser *p = parser_check(L, 1);
-  logger_gc(ts_parser_logger(p));
-  ts_parser_delete(p);
+  TSParser **ud = luaL_checkudata(L, 1, TS_META_PARSER);
+  if (*ud) {
+    logger_gc(ts_parser_logger(*ud));
+    ts_parser_delete(*ud);
+    *ud = NULL;
+  }
   return 0;
 }
 
@@ -476,20 +496,20 @@ static void push_ranges(lua_State *L, const TSRange *ranges, const size_t length
   for (size_t i = 0; i < length; i++) {
     lua_createtable(L, include_bytes ? 6 : 4, 0);
     int j = 1;
-    lua_pushinteger(L, ranges[i].start_point.row);
+    lua_pushnumber(L, (lua_Number)ranges[i].start_point.row);
     lua_rawseti(L, -2, j++);
-    lua_pushinteger(L, ranges[i].start_point.column);
+    lua_pushnumber(L, (lua_Number)ranges[i].start_point.column);
     lua_rawseti(L, -2, j++);
     if (include_bytes) {
-      lua_pushinteger(L, ranges[i].start_byte);
+      lua_pushnumber(L, (lua_Number)ranges[i].start_byte);
       lua_rawseti(L, -2, j++);
     }
-    lua_pushinteger(L, ranges[i].end_point.row);
+    lua_pushnumber(L, (lua_Number)ranges[i].end_point.row);
     lua_rawseti(L, -2, j++);
-    lua_pushinteger(L, ranges[i].end_point.column);
+    lua_pushnumber(L, (lua_Number)ranges[i].end_point.column);
     lua_rawseti(L, -2, j++);
     if (include_bytes) {
-      lua_pushinteger(L, ranges[i].end_byte);
+      lua_pushnumber(L, (lua_Number)ranges[i].end_byte);
       lua_rawseti(L, -2, j++);
     }
 
@@ -504,6 +524,33 @@ static bool on_parser_progress(TSParseState *state)
   return parse_time >= payload->timeout_threshold_ns;
 }
 
+TSTree *nts_parser_parse_buf(TSParser *p, const TSTree *old_tree, int bufnr, uint64_t timeout_ns)
+{
+  buf_T *buf = handle_get_buffer(bufnr);
+
+  if (!buf) {
+    abort();
+  }
+
+  TSInput input = (TSInput){ (void *)buf, input_cb, TSInputEncodingUTF8, NULL };
+
+  if (timeout_ns == 0) {
+    return ts_parser_parse(p, old_tree, input);
+  }
+
+  TSLuaParserCallbackPayload payload = (TSLuaParserCallbackPayload){
+    .parse_start_time = os_hrtime(),
+    .timeout_threshold_ns = timeout_ns
+  };
+
+  TSParseOptions parse_options = {
+    .payload = &payload,
+    .progress_callback = on_parser_progress
+  };
+
+  return ts_parser_parse_with_options(p, old_tree, input, parse_options);
+}
+
 static int parser_parse(lua_State *L)
 {
   TSParser *p = parser_check(L, 1);
@@ -513,34 +560,33 @@ static int parser_parse(lua_State *L)
     old_tree = ud ? ud->tree : NULL;
   }
 
-  if (lua_type(L, 3) != LUA_TNUMBER) {
-    return luaL_argerror(L, 3, "expected buffer handle");
-  }
-
-  handle_T bufnr = (handle_T)lua_tointeger(L, 3);
-  buf_T *buf = handle_get_buffer(bufnr);
-
-  if (!buf) {
-#define BUFSIZE 256
-    char ebuf[BUFSIZE] = { 0 };
-    vim_snprintf(ebuf, BUFSIZE, "invalid buffer handle: %d", bufnr);
-    return luaL_argerror(L, 3, ebuf);
-#undef BUFSIZE
-  }
-
-  TSInput input = (TSInput){ (void *)buf, input_cb, TSInputEncodingUTF8, NULL };
   TSTree *new_tree = NULL;
 
-  if (!lua_isnil(L, 5)) {
-    uint64_t timeout_ns = (uint64_t)lua_tointeger(L, 5);
-    TSLuaParserCallbackPayload payload =
-      (TSLuaParserCallbackPayload){ .parse_start_time = os_hrtime(),
-                                    .timeout_threshold_ns = timeout_ns };
-    TSParseOptions parse_options = { .payload = &payload,
-                                     .progress_callback = on_parser_progress };
-    new_tree = ts_parser_parse_with_options(p, old_tree, input, parse_options);
-  } else {
-    new_tree = ts_parser_parse(p, old_tree, input);
+  // This switch is necessary because of the behavior of lua_isstring, that
+  // consider numbers as strings...
+  switch (lua_type(L, 3)) {
+  case LUA_TSTRING: {
+    size_t len;
+    const char *str = lua_tolstring(L, 3, &len);
+    new_tree = ts_parser_parse_string(p, old_tree, str, (uint32_t)len);
+    break;
+  }
+  case LUA_TNUMBER: {
+    handle_T bufnr = (handle_T)lua_tointeger(L, 3);
+    buf_T *buf = handle_get_buffer(bufnr);
+
+    if (!buf) {
+      char ebuf[IOSIZE] = { 0 };
+      vim_snprintf(ebuf, IOSIZE, "invalid buffer handle: %d", bufnr);
+      return luaL_argerror(L, 3, ebuf);
+    }
+
+    uint64_t timeout_ns = lua_isnil(L, 5) ? 0 : (uint64_t)lua_tointeger(L, 5);
+    new_tree = nts_parser_parse_buf(p, old_tree, bufnr, timeout_ns);
+    break;
+  }
+  default:
+    return luaL_argerror(L, 3, "expected either string or buffer handle");
   }
 
   bool include_bytes = (lua_gettop(L) >= 4) && lua_toboolean(L, 4);
@@ -580,6 +626,16 @@ static void range_err(lua_State *L)
   luaL_error(L, "Ranges can only be made from 6 element long tables or nodes.");
 }
 
+static uint32_t lua_checkuint32(lua_State *L, int index)
+{
+  lua_Number value = luaL_checknumber(L, index);
+  uint32_t converted = (uint32_t)value;
+  if (value < 0 || value > (lua_Number)UINT32_MAX || (lua_Number)converted != value) {
+    luaL_error(L, "Range value out of bounds");
+  }
+  return converted;
+}
+
 // Use the top of the stack (without popping it) to create a TSRange, it can be
 // either a lua table or a TSNode
 static void range_from_lua(lua_State *L, TSRange *range)
@@ -593,27 +649,27 @@ static void range_from_lua(lua_State *L, TSRange *range)
     }
 
     lua_rawgeti(L, -1, 1);  // [ range, start_row]
-    uint32_t start_row = (uint32_t)luaL_checkinteger(L, -1);
+    uint32_t start_row = lua_checkuint32(L, -1);
     lua_pop(L, 1);
 
     lua_rawgeti(L, -1, 2);  // [ range, start_col]
-    uint32_t start_col = (uint32_t)luaL_checkinteger(L, -1);
+    uint32_t start_col = lua_checkuint32(L, -1);
     lua_pop(L, 1);
 
     lua_rawgeti(L, -1, 3);  // [ range, start_byte]
-    uint32_t start_byte = (uint32_t)luaL_checkinteger(L, -1);
+    uint32_t start_byte = lua_checkuint32(L, -1);
     lua_pop(L, 1);
 
     lua_rawgeti(L, -1, 4);  // [ range, end_row]
-    uint32_t end_row = (uint32_t)luaL_checkinteger(L, -1);
+    uint32_t end_row = lua_checkuint32(L, -1);
     lua_pop(L, 1);
 
     lua_rawgeti(L, -1, 5);  // [ range, end_col]
-    uint32_t end_col = (uint32_t)luaL_checkinteger(L, -1);
+    uint32_t end_col = lua_checkuint32(L, -1);
     lua_pop(L, 1);
 
     lua_rawgeti(L, -1, 6);  // [ range, end_byte]
-    uint32_t end_byte = (uint32_t)luaL_checkinteger(L, -1);
+    uint32_t end_byte = lua_checkuint32(L, -1);
     lua_pop(L, 1);  // [ range ]
 
     *range = (TSRange) {

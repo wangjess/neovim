@@ -32,8 +32,8 @@ local M = {}
 --- @field lines string[] snapshot of buffer lines from last didChange
 --- @field lines_tmp string[]
 --- @field pending_changes table[] List of debounced changes in incremental sync mode
---- @field timer uv.uv_timer_t? uv_timer
---- @field last_flush nil|number uv.hrtime of the last flush/didChange-notification
+--- @field timer? uv.uv_timer_t uv_timer
+--- @field last_flush? number uv.hrtime of the last flush/didChange-notification
 --- @field needs_flush boolean true if buffer updates haven't been sent to clients/servers yet
 --- @field refs integer how many clients are using this group
 ---
@@ -64,11 +64,11 @@ local state_by_group = setmetatable({}, {
 ---@param client vim.lsp.Client
 ---@return vim.lsp.CTGroup
 local function get_group(client)
-  local allow_inc_sync = vim.F.if_nil(client.flags.allow_incremental_sync, true)
+  local allow_inc_sync = vim.nonnil(client.flags.allow_incremental_sync, true)
   local change_capability = vim.tbl_get(client.server_capabilities, 'textDocumentSync', 'change')
   local sync_kind = change_capability or protocol.TextDocumentSyncKind.None
   if not allow_inc_sync and change_capability == protocol.TextDocumentSyncKind.Incremental then
-    sync_kind = protocol.TextDocumentSyncKind.Full --[[@as integer]]
+    sync_kind = protocol.TextDocumentSyncKind.Full
   end
   return {
     sync_kind = sync_kind,
@@ -165,16 +165,69 @@ function M.init(client, bufnr)
   end
 end
 
---- @param client vim.lsp.Client
+--- Sends didOpen/didClose/didSave to all client groups.
+---
 --- @param bufnr integer
---- @param name string
---- @return string
-function M._get_and_set_name(client, bufnr, name)
-  local state = state_by_group[get_group(client)] or {}
-  local buf_state = (state.buffers or {})[bufnr]
-  local old_name = buf_state.name
-  buf_state.name = name
-  return old_name
+function M._send_did_save(bufnr)
+  --- Groups of the clients attached to `bufnr`, along with those clients.
+  --- Only clients attached to the buffer must be notified.
+  local groups = {} ---@type table<string,{group: vim.lsp.CTGroup, clients: vim.lsp.Client[]}>
+  for _, client in pairs(vim.lsp.get_clients({ bufnr = bufnr })) do
+    local group = get_group(client)
+    local key = group_key(group)
+    local entry = groups[key]
+    if not entry then
+      entry = { group = group, clients = {} }
+      groups[key] = entry
+    end
+    table.insert(entry.clients, client)
+  end
+
+  local uri = vim.uri_from_bufnr(bufnr)
+  local text = vim.func._memoize('concat', vim.lsp._buf_get_full_text)
+
+  -- Send didOpen/didClose/didSave to all client groups.
+  for _, entry in pairs(groups) do
+    local name = api.nvim_buf_get_name(bufnr)
+    local state = state_by_group[entry.group]
+    local buf_state = state.buffers[bufnr] or {}
+    local old_name = buf_state.name
+    buf_state.name = name
+
+    for _, client in ipairs(entry.clients) do
+      if old_name and name ~= old_name then
+        client:notify('textDocument/didClose', {
+          textDocument = {
+            uri = vim.uri_from_fname(old_name),
+          },
+        }, bufnr)
+        client:notify('textDocument/didOpen', {
+          textDocument = {
+            version = 0,
+            uri = uri,
+            languageId = client.get_language_id(bufnr, vim.bo[bufnr].filetype),
+            text = vim.lsp._buf_get_full_text(bufnr),
+          },
+        }, bufnr)
+        util.buf_versions[bufnr] = 0
+      end
+      local save_capability = vim.tbl_get(client.server_capabilities, 'textDocumentSync', 'save')
+      if save_capability then
+        local included_text --- @type string?
+        if type(save_capability) == 'table' and save_capability.includeText then
+          included_text = text(bufnr)
+        end
+        client:notify('textDocument/didSave', {
+          textDocument = {
+            uri = uri,
+          },
+          text = included_text,
+        }, bufnr)
+      else
+        M.flush(client, bufnr)
+      end
+    end
+  end
 end
 
 ---@param buf_state vim.lsp.CTBufferState
@@ -199,6 +252,9 @@ function M.reset_buf(client, bufnr)
   end
   assert(state.buffers, 'CTGroupState must have buffers')
   local buf_state = state.buffers[bufnr]
+  if not buf_state then
+    return
+  end
   buf_state.refs = buf_state.refs - 1
   assert(buf_state.refs >= 0, 'refcount on buffer state must not get negative')
   if buf_state.refs == 0 then
@@ -280,7 +336,7 @@ local function send_changes(bufnr, sync_kind, state, buf_state)
           version = util.buf_versions[bufnr],
         },
         contentChanges = changes,
-      })
+      }, bufnr)
     end
   end
 end
@@ -302,6 +358,9 @@ local function send_changes_for_group(bufnr, firstline, lastline, new_lastline, 
     )
   end
   local buf_state = state.buffers[bufnr]
+  if not buf_state then
+    return
+  end
   buf_state.needs_flush = true
   reset_timer(buf_state)
   local debounce = next_debounce(state.debounce, buf_state)

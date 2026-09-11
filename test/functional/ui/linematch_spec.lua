@@ -2,6 +2,8 @@ local t = require('test.testutil')
 local n = require('test.functional.testnvim')()
 local Screen = require('test.functional.ui.screen')
 
+local describe, it, before_each, setup, teardown =
+  t.describe, t.it, t.before_each, t.setup, t.teardown
 local feed = n.feed
 local clear = n.clear
 local write_file = t.write_file
@@ -557,8 +559,7 @@ something
       {7:  }{8: 11 }^common line                                │{7:  }{8: 14 }common line                                 |
       {7:  }{8:    }{23:-------------------------------------------}│{7:  }{8: 15 }{22:DEF                                         }|
       {7:  }{8: 12 }something                                  │{7:  }{8: 16 }something                                   |
-      {1:~                                                }│{1:~                                                 }|
-      {1:~                                                }│{1:~                                                 }|
+      {1:~                                                }│{1:~                                                 }|*2
       {3:Xtest-functional-diff-screen-1.2                  }{2:Xtest-functional-diff-screen-1 [+]                }|
       :e                                                                                                  |
       ]])
@@ -584,8 +585,7 @@ something
       {7:  }{8:    }{23:-------------------------------------------}│{7:  }{8: 14 }{22:DEF                                         }|
       {7:  }{8: 11 }common line                                │{7:  }{8: 15 }common line                                 |
       {7:  }{8: 12 }^something                                  │{7:  }{8: 16 }something                                   |
-      {1:~                                                }│{1:~                                                 }|
-      {1:~                                                }│{1:~                                                 }|
+      {1:~                                                }│{1:~                                                 }|*2
       {3:Xtest-functional-diff-screen-1.2                  }{2:Xtest-functional-diff-screen-1 [+]                }|
       :e                                                                                                  |
       ]])

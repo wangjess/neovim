@@ -123,8 +123,9 @@ local function render_line(line, row, hls)
         attr = Attrs.None
       end
 
-      -- Grow the previous highlight group if possible
-      if last_hl and last_hl.attr == attr and last_hl.final == byte then
+      -- Grow the previous highlight group if possible. `hls` spans the buffer,
+      -- so only grow a group that is on the current row.
+      if last_hl and last_hl.row == row and last_hl.attr == attr and last_hl.final == byte then
         last_hl.final = byte + #char
       else
         hls[#hls + 1] = { attr = attr, row = row, start = byte, final = byte + #char }
@@ -219,6 +220,25 @@ end
 local function get_path(name, sect)
   name = name or ''
   sect = sect or ''
+  -- We can avoid relying on -S or -s here since they are very
+  -- inconsistently supported. Instead, call -w with a section and a name.
+  local cmd = sect == '' and { 'man', '-w', name } or { 'man', '-w', sect, name }
+
+  local lines = system(cmd, true)
+  local results = vim.split(lines, '\n', { trimempty = true })
+
+  return M._match_manpage_path(results, name, sect)
+end
+
+--- Given an array of paths returned by man -w,
+--- find the correct path for the given name and section.
+--- @param paths? string[]
+--- @param name? string
+--- @param sect? string
+function M._match_manpage_path(paths, name, sect)
+  paths = paths or {}
+  name = name or ''
+  sect = sect or ''
   -- Some man implementations (OpenBSD) return all available paths from the
   -- search command. Previously, this function would simply select the first one.
   --
@@ -234,47 +254,51 @@ local function get_path(name, sect)
   -- clock_getres.2, which is the right page. Searching the results for
   -- clock_gettime will no longer work. In this case, we should just use the
   -- first one that was found in the correct section.
-  --
-  -- Finally, we can avoid relying on -S or -s here since they are very
-  -- inconsistently supported. Instead, call -w with a section and a name.
-  local cmd --- @type string[]
-  if sect == '' then
-    cmd = { 'man', '-w', name }
-  else
-    cmd = { 'man', '-w', sect, name }
-  end
-
-  local lines = system(cmd, true)
-  local results = vim.split(lines, '\n', { trimempty = true })
-
-  if #results == 0 then
+  if #paths == 0 then
     return
   end
 
-  -- `man -w /some/path` will return `/some/path` for any existent file, which
-  -- stops us from actually determining if a path has a corresponding man file.
-  -- Since `:Man /some/path/to/man/file` isn't supported anyway, we should just
-  -- error out here if we detect this is the case.
-  if sect == '' and #results == 1 and results[1] == name then
-    return
+  -- `man -w /some/path` echoes the input for any existent file. Accept only
+  -- paths that look like a man page (`.../man1/bash.1`). #30873
+  if sect == '' and #paths == 1 and paths[1] == name then
+    local tail = vim.fs.basename(name)
+    local parent = vim.fs.basename(vim.fs.dirname(name))
+    if not (parent:find('^man') and tail:find('%.%d')) then
+      return
+    end
+    return name
   end
 
   -- find any that match the specified name
+  --- @type string[]
   --- @param v string
   local namematches = vim.tbl_filter(function(v)
-    local tail = fn.fnamemodify(v, ':t')
+    local tail = vim.fs.basename(v)
     return tail:find(name, 1, true) ~= nil
-  end, results) or {}
-  local sectmatches = {}
+  end, paths)
+  local sectmatches = {} --- @type string[]
 
   if #namematches > 0 and sect ~= '' then
     --- @param v string
     sectmatches = vim.tbl_filter(function(v)
-      return fn.fnamemodify(v, ':e') == sect
+      -- On some systems, there are multiple extensions, e.g. strlen.3.gz
+      -- We must test all of the extensions to make sure we get the correct match.
+      -- Limit to 3 tests to avoid the risk of getting stuck.
+      local root = v
+      for _ = 1, 3 do
+        local extension = fn.fnamemodify(root, ':e')
+        if extension == sect then
+          return true
+        elseif extension == '' then
+          return false
+        end
+        root = fn.fnamemodify(root, ':r')
+      end
+      return false
     end, namematches)
   end
 
-  return (sectmatches[1] or namematches[1] or results[1]):gsub('\n+$', '')
+  return (sectmatches[1] or namematches[1] or paths[1]):gsub('\n+$', '')
 end
 
 --- Attempt to extract the name and sect out of 'name(sect)'
@@ -361,10 +385,10 @@ end
 --- (try `:Man 3 App::CLI`). Also on linux, name seems to be case-insensitive.
 --- So for `:Man PRIntf`, we still want the name of the buffer to be 'printf'.
 --- @param path string
---- @return string name
---- @return string sect
+--- @return string? name
+--- @return string? sect
 local function parse_path(path)
-  local tail = fn.fnamemodify(path, ':t')
+  local tail = vim.fs.basename(path)
   if
     path:match('%.[glx]z$')
     or path:match('%.bz2$')
@@ -397,7 +421,7 @@ end
 local function set_options()
   vim.bo.swapfile = false
   vim.bo.buftype = 'nofile'
-  vim.bo.bufhidden = 'unload'
+  vim.bo.bufhidden = 'hide'
   vim.bo.modified = false
   vim.bo.readonly = true
   vim.bo.modifiable = false
@@ -408,10 +432,8 @@ end
 --- @type boolean?
 local localfile_arg
 
---- @param path string
---- @param silent boolean?
---- @return string
-local function get_page(path, silent)
+--- @return integer
+local function get_manwidth()
   -- Disable hard-wrap by using a big $MANWIDTH (max 1000 on some systems #9065).
   -- Soft-wrap: ftplugin/man.lua sets wrap/breakindent/….
   -- Hard-wrap: driven by `man`.
@@ -419,16 +441,26 @@ local function get_page(path, silent)
   if (vim.g.man_hardwrap or 1) ~= 1 then
     manwidth = 999
   elseif vim.env.MANWIDTH then
-    vim.env.MANWIDTH = tonumber(vim.env.MANWIDTH) or 0
-    manwidth = math.min(vim.env.MANWIDTH, api.nvim_win_get_width(0) - vim.o.wrapmargin)
+    local env_manwidth = vim._tointeger(vim.env.MANWIDTH) or 0
+    manwidth = math.min(env_manwidth, api.nvim_win_get_width(0) - vim.o.wrapmargin)
   else
     manwidth = api.nvim_win_get_width(0) - vim.o.wrapmargin
   end
+  return manwidth
+end
+
+--- @param path string
+--- @param silent boolean?
+--- @param manwidth integer?
+--- @return string
+local function get_page(path, silent, manwidth)
+  manwidth = manwidth or get_manwidth()
 
   if localfile_arg == nil then
     local mpath = get_path('man')
     -- Check for -l support.
-    localfile_arg = (mpath and system({ 'man', '-l', mpath }, true) or '') ~= ''
+    localfile_arg = (mpath and system({ 'man', '-l', mpath }, true, { MANPAGER = 'cat' }) or '')
+      ~= ''
   end
 
   local cmd = localfile_arg and { 'man', '-l', path } or { 'man', path }
@@ -451,6 +483,9 @@ local function format_candidate(path, psect)
     return ''
   end
   local name, sect = parse_path(path)
+  if not name or not sect then
+    return ''
+  end
   if sect == psect then
     return name
   elseif sect:match(psect .. '.+$') then -- invalid extensions
@@ -475,11 +510,16 @@ local function get_paths(name, sect)
   -- - does not work on MacOS 14 and later.
   -- - only returns '/usr/bin/man' on MacOS 13 and earlier.
   --- @type string?
-  local mandirs_raw = vim.F.npcall(system, { 'manpath', '-q' })
-    or vim.F.npcall(system, { 'man', '-w' })
+  local mandirs_raw = vim.npcall(system, { 'manpath', '-q' })
+    or vim.npcall(system, { 'man', '-w' })
     or vim.env.MANPATH
 
   if not mandirs_raw then
+    -- Fall back to direct lookup ("man -w [sect] name"). NetBSD man lacks "-w". #25919
+    local ok, path = pcall(M._find_path, name, sect)
+    if ok and path then
+      return { path }
+    end
     return {}, "Could not determine man directories from: 'man -w', 'manpath' or $MANPATH"
   end
 
@@ -529,7 +569,7 @@ local function parse_cmdline(arg_lead, cmd_line)
 
   if arg_lead:match('^[^()]+%([^()]*$') then
     -- cursor (|) is at ':Man printf(|' or ':Man 1 printf(|'
-    -- The later is is allowed because of ':Man pri<TAB>'.
+    -- The latter is allowed because of ':Man pri<TAB>'.
     -- It will offer 'priclass.d(1m)' even though section is specified as 1.
     local tmp = vim.split(arg_lead, '(', { plain = true })
     local name = tmp[1]
@@ -622,11 +662,13 @@ function M.goto_tag(pattern, _, _)
 
   for _, path in ipairs(paths) do
     local pname, psect = parse_path(path)
-    ret[#ret + 1] = {
-      name = pname,
-      filename = ('man://%s(%s)'):format(pname, psect),
-      cmd = '1',
-    }
+    if pname and psect then
+      ret[#ret + 1] = {
+        name = pname,
+        filename = ('man://%s(%s)'):format(pname, psect),
+        cmd = '1',
+      }
+    end
   end
 
   return ret
@@ -644,8 +686,8 @@ function M.init_pager()
   -- know the correct casing, cf. `man glDrawArraysInstanced`).
   --- @type string
   local ref = (fn.getline(1):match('^[^)]+%)') or ''):gsub(' ', '_')
-  local _, sect, err = pcall(parse_ref, ref)
-  vim.b.man_sect = err ~= nil and sect or ''
+  local ok, _, sect = pcall(parse_ref, ref)
+  vim.b.man_sect = ok and (sect or '') or ''
 
   local man_bufname = 'man://' .. fn.fnameescape(ref):lower()
 
@@ -665,6 +707,7 @@ function M.init_pager()
   end
 
   set_options()
+  vim.bo.bufhidden = 'unload'
 end
 
 --- Combine the name and sect into a manpage reference so that all
@@ -725,9 +768,12 @@ function M.open_page(count, smods, args)
   end
 
   name, sect = parse_path(path)
+  if not name or not sect then
+    return 'no manual entry for ' .. (name or path)
+  end
   local buf = api.nvim_get_current_buf()
   local save_tfu = vim.bo[buf].tagfunc
-  vim.bo[buf].tagfunc = "v:lua.require'man'.goto_tag"
+  vim.bo[buf].tagfunc = M.goto_tag
 
   local target = ('%s(%s)'):format(name, sect)
 
@@ -766,10 +812,12 @@ function M.read_page(ref)
     return 'no manual entry for ' .. name
   end
 
-  local _, sect1 = parse_path(path)
-  local page = get_page(path)
+  local _, page_sect = parse_path(path)
+  local manwidth = get_manwidth()
+  local page = get_page(path, nil, manwidth)
 
-  vim.b.man_sect = sect1
+  vim.b.manwidth = manwidth
+  vim.b.man_sect = page_sect
   vim.bo.modifiable = true
   vim.bo.readonly = false
   vim.bo.swapfile = false
@@ -794,6 +842,20 @@ function M.read_page(ref)
   set_options()
 end
 
+--- @return string? err
+function M.refresh_page()
+  if vim.bo.filetype ~= 'man' then
+    return
+  end
+
+  local ref = api.nvim_buf_get_name(0):match('man://(.*)')
+  if not ref or vim.b.manwidth == nil or vim.b.manwidth == get_manwidth() then
+    return
+  end
+
+  return M.read_page(ref)
+end
+
 function M.show_toc()
   local bufnr = api.nvim_get_current_buf()
   local bufname = api.nvim_buf_get_name(bufnr)
@@ -808,7 +870,7 @@ function M.show_toc()
 
   local lnum = 2
   local last_line = fn.line('$') - 1
-  while lnum and lnum < last_line do
+  while lnum > 0 and lnum < last_line do
     local text = fn.getline(lnum)
     if text:match('^%s+[-+]%S') or text:match('^   %S') or text:match('^%S') then
       toc[#toc + 1] = {

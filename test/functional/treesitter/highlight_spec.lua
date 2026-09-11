@@ -2,6 +2,7 @@ local t = require('test.testutil')
 local n = require('test.functional.testnvim')()
 local Screen = require('test.functional.ui.screen')
 
+local describe, it, before_each, finally = t.describe, t.it, t.before_each, t.finally
 local clear = n.clear
 local insert = n.insert
 local exec_lua = n.exec_lua
@@ -180,6 +181,19 @@ describe('treesitter highlighting (C)', function()
     end)
     -- treesitter highlighting is used
     screen:expect(hl_grid_ts_c)
+
+    -- A second start() on an already-highlighted buffer is a no-op: it returns the existing
+    -- highlighter instead of replacing it (replacing it would leak the old instance's
+    -- on_bytes/on_changedtree callbacks, since destroy() is never called on it).
+    eq(
+      true,
+      exec_lua(function()
+        local buf = vim.api.nvim_get_current_buf()
+        local first = vim.treesitter.highlighter.active[buf]
+        vim.treesitter.start()
+        return first == vim.treesitter.highlighter.active[buf]
+      end)
+    )
 
     exec_lua(function()
       vim.treesitter.stop()
@@ -864,6 +878,37 @@ describe('treesitter highlighting (C)', function()
     })
   end)
 
+  it('supports @noconceal', function()
+    insert([[
+      int foo = bar;
+    ]])
+
+    exec_lua(function()
+      vim.opt.cole = 2
+      local parser = vim.treesitter.get_parser(0, 'c')
+      vim.treesitter.highlighter.new(parser, {
+        queries = {
+          c = [[
+        ((identifier) @conceal
+         (#set! conceal "X"))
+
+        ((identifier) @noconceal
+         (#eq? @noconceal "bar"))
+      ]],
+        },
+      })
+    end)
+
+    screen:expect({
+      grid = [[
+        int {14:X} = bar;                                                     |
+        ^                                                                 |
+        {1:~                                                                }|*15
+                                                                         |
+      ]],
+    })
+  end)
+
   it('@foo.bar groups has the correct fallback behavior', function()
     local get_hl = function(name)
       return api.nvim_get_hl_by_name(name, 1).foreground
@@ -977,6 +1022,26 @@ describe('treesitter highlighting (C)', function()
                                                                          |
       ]],
     })
+  end)
+
+  it('#35575', function()
+    -- Window size is 14x14, and first string literal ends at byte 14
+    -- See: https://github.com/neovim/neovim/pull/35587
+    screen:try_resize(14, 15)
+
+    exec_lua(function()
+      local line = 'A a="\240\157\158\140\240\157\158\140" "aaaaaaaaaaaaaaaaaaaaaaaa";'
+      vim.api.nvim_buf_set_lines(0, 0, -1, true, { line })
+      vim.cmd('set nowrap')
+      vim.treesitter.query.set('c', 'highlights', hl_query_c)
+      vim.treesitter.start(0, 'c')
+    end)
+
+    screen:expect([[
+      {6:^A} a={26:"𝞌𝞌"} {26:"aaaa}|
+      {1:~             }|*13
+                    |
+    ]])
   end)
 end)
 
@@ -1417,6 +1482,21 @@ printf('Hello World!');
       assert(vim.api.nvim_win_text_height(0, {}).all == 1, 'line concealed')
     end)
   end)
+
+  it('conceals backslash in hard_line_break/backslash_escape', function()
+    command('set concealcursor=n')
+    command('set conceallevel=2')
+    insert('Hello\\\nWorld\nHello\\. World')
+    screen:expect({
+      grid = [[
+        Hello                                   |
+        World                                   |
+        Hello. Worl^d                            |
+        {1:~                                       }|*2
+                                                |
+      ]],
+    })
+  end)
 end)
 
 it('starting and stopping treesitter highlight in init.lua works #29541', function()
@@ -1443,7 +1523,7 @@ end)
 
 it('no nil index for missing highlight query', function()
   clear()
-  local cqueries = vim.uv.cwd() .. '/runtime/queries/c/'
+  local cqueries = t.paths.test_source_path .. '/runtime/queries/c/'
   os.rename(cqueries .. 'highlights.scm', cqueries .. '_highlights.scm')
   finally(function()
     os.rename(cqueries .. '_highlights.scm', cqueries .. 'highlights.scm')
@@ -1452,4 +1532,51 @@ it('no nil index for missing highlight query', function()
     local parser = vim.treesitter.get_parser(0, 'c')
     vim.treesitter.highlighter.new(parser)
   ]])
+end)
+
+it('spell navigation correctly wraps back to the first line (Row 0) #36970', function()
+  clear()
+  insert([[
+mispelledone
+mispelledtwo]])
+
+  command('set spell')
+  command('set wrapscan')
+  exec_lua(function()
+    vim.treesitter.start(0, 'markdown')
+  end)
+
+  api.nvim_win_set_cursor(0, { 2, 0 })
+
+  feed(']s')
+
+  local pos = api.nvim_win_get_cursor(0)
+  eq(1, pos[1], 'Should have wrapped back to Line 1')
+end)
+
+it('conceals lines contributed by an injected tree', function()
+  clear()
+  command('set conceallevel=3')
+
+  -- Measured without an intervening redraw, so that the conceal_line callback
+  -- is the thing that has to parse the injection. The outer ~~~ fences come
+  -- from the root tree, the inner ``` fences from the markdown tree injected
+  -- into it; all four carry conceal_lines, leaving "filler", "print(1)" and
+  -- "tail" on screen.
+  eq(
+    3,
+    exec_lua(function()
+      vim.api.nvim_buf_set_lines(0, 0, -1, false, {
+        'filler',
+        '~~~markdown',
+        '```lua',
+        'print(1)',
+        '```',
+        '~~~',
+        'tail',
+      })
+      vim.treesitter.start(0, 'markdown')
+      return vim.api.nvim_win_text_height(0, {}).all
+    end)
+  )
 end)

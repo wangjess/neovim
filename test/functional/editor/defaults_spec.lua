@@ -8,6 +8,7 @@ local t = require('test.testutil')
 local n = require('test.functional.testnvim')()
 local Screen = require('test.functional.ui.screen')
 
+local describe, it = t.describe, t.it
 describe('default', function()
   describe('autocommands', function()
     it('nvim.terminal.TermClose closes terminal with default shell on success', function()
@@ -100,8 +101,8 @@ describe('default', function()
         screen:set_default_attr_ids({
           [1] = { foreground = Screen.colors.NvimDarkGray4 },
           [2] = {
-            foreground = Screen.colors.NvimDarkGray3,
-            background = Screen.colors.NvimLightGray3,
+            foreground = Screen.colors.NvimLightGray2,
+            background = Screen.colors.NvimDarkGray4,
           },
           [3] = {
             foreground = Screen.colors.NvimLightGrey1,
@@ -179,8 +180,8 @@ describe('default', function()
         screen:set_default_attr_ids({
           [1] = { foreground = Screen.colors.NvimDarkGrey4 },
           [2] = {
-            background = Screen.colors.NvimLightGray3,
-            foreground = Screen.colors.NvimDarkGrey3,
+            background = Screen.colors.NvimDarkGrey4,
+            foreground = Screen.colors.NvimLightGray2,
           },
         })
         screen:expect({
@@ -199,8 +200,8 @@ describe('default', function()
         screen:set_default_attr_ids({
           [1] = { foreground = Screen.colors.NvimDarkGray4 },
           [2] = {
-            background = Screen.colors.NvimLightGrey3,
-            foreground = Screen.colors.NvimDarkGray3,
+            background = Screen.colors.NvimDarkGray4,
+            foreground = Screen.colors.NvimLightGrey2,
           },
           [3] = { foreground = Screen.colors.NvimLightRed },
           [4] = { foreground = Screen.colors.NvimLightCyan },

@@ -1,6 +1,7 @@
 local t = require('test.testutil')
 local n = require('test.functional.testnvim')()
 
+local describe, it, setup, teardown, pending = t.describe, t.it, t.setup, t.teardown, t.pending
 local clear = n.clear
 local eq = t.eq
 local exec = n.exec
@@ -19,7 +20,7 @@ local function last_set_lua_verbose_tests(cmd, v1)
     script_file = 'test_verbose.lua'
     local current_dir = fn.getcwd()
     current_dir = fn.fnamemodify(current_dir, ':~')
-    script_location = table.concat({ current_dir, n.get_pathsep(), script_file })
+    script_location = current_dir .. '/' .. script_file
 
     write_file(
       script_file,
@@ -80,6 +81,10 @@ local set_list = ([[
 vim.api.nvim_exec2(set_list, {})
 
 vim.api.nvim_create_autocmd('User', { pattern = 'set_mouse', callback = cb })
+
+coroutine.wrap(function()
+  vim.o.busy = 2
+end)()
 ]=]
     )
     exec(cmd .. ' ' .. script_file)
@@ -281,6 +286,19 @@ TestHL2        xxx guibg=Green
       result
     )
   end)
+
+  it('for option set in coroutine', function()
+    local result = exec_capture(':verbose set busy?')
+    eq(
+      string.format(
+        [[
+  busy=2
+	Last set from %s]],
+        get_last_set_location(59)
+      ),
+      result
+    )
+  end)
 end
 
 describe('lua :verbose with -V1', function()
@@ -311,7 +329,7 @@ describe(':verbose when using API from Vimscript', function()
     script_file = 'test_verbose.vim'
     local current_dir = fn.getcwd()
     current_dir = fn.fnamemodify(current_dir, ':~')
-    script_location = table.concat({ current_dir, n.get_pathsep(), script_file })
+    script_location = current_dir .. '/' .. script_file
 
     write_file(
       script_file,

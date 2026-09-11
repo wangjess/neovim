@@ -28,7 +28,7 @@
 --    * If the timeout expires, the last match error will be reported and the
 --      test will fail.
 --
--- The 30 most common highlight groups are predefined, see init_colors() below.
+-- The 31 most common highlight groups are predefined, see init_colors() below.
 -- In this case "5" is a predefined highlight associated with the set composed of one
 -- attribute: bold. Note that since the {5:} markup is not a real part of the
 -- screen, the delimiter "|" moved to the right. Also, the highlighting of the
@@ -47,7 +47,6 @@
 
 local t = require('test.testutil')
 local n = require('test.functional.testnvim')()
-local busted = require('busted')
 local uv = vim.uv
 
 local deepcopy = vim.deepcopy
@@ -156,6 +155,7 @@ local function _init_colors()
     [28] = { foreground = Screen.colors.SlateBlue, underline = true },
     [29] = { foreground = Screen.colors.SlateBlue, bold = true },
     [30] = { background = Screen.colors.Red },
+    [31] = { background = Screen.colors.Plum1, reverse = true },
   }
 
   Screen._global_hl_names = {}
@@ -316,6 +316,10 @@ function Screen:attach(session)
 end
 
 function Screen:detach()
+  if self._stdout and not self._stdout:is_closing() then
+    self._stdout:close()
+  end
+  self._stdout = nil
   self.uimeths.detach()
   self._session = nil
 end
@@ -447,6 +451,7 @@ end
 --- @field mouse_enabled? boolean
 ---
 --- @field win_viewport? table<integer,table<string,integer>>
+--- @field win_viewport_margins? table<integer,table<string,integer>>
 --- @field win_pos? table<integer,table<string,integer>>
 --- @field float_pos? [integer,integer]
 --- @field hl_groups? table<string,integer>
@@ -547,7 +552,7 @@ function Screen:expect(expected, attr_ids, ...)
     end
 
     local actual_rows
-    if expected.any or grid then
+    if expected.any or expected.none or grid then
       actual_rows = self:render(not (expected.any or expected.none), attr_state)
     end
 
@@ -670,7 +675,7 @@ screen:redraw_debug() to show all intermediate screen states.]]
     -- the ext_ feature being disabled, or the feature currently not activated
     -- (e.g. no external cmdline visible). Some extensions require
     -- preprocessing to represent highlights in a reproducible way.
-    local extstate = self:_extstate_repr(attr_state)
+    local extstate = self:_extstate_repr(attr_state, expected)
     if expected.mode ~= nil then
       extstate.mode = self.mode
     end
@@ -799,6 +804,7 @@ function Screen:_wait(check, flags)
   local minimal_timeout = default_timeout_factor * 2
 
   local immediate_seen, intermediate_seen = false, false
+  local intermediate_state_snapshot = ''
   if not check() then
     minimal_timeout = default_timeout_factor * 20
     immediate_seen = true
@@ -808,6 +814,8 @@ function Screen:_wait(check, flags)
   -- must not change, so always wait this full time.
   if flags.unchanged then
     minimal_timeout = flags.timeout or default_timeout_factor * 20
+  elseif flags.intermediate then
+    minimal_timeout = default_timeout_factor * 20
   end
 
   assert(timeout >= minimal_timeout)
@@ -825,6 +833,10 @@ function Screen:_wait(check, flags)
     err = check()
     checked = true
     if err and immediate_seen then
+      if not intermediate_seen and flags.unchanged then
+        -- Save the first intermediate state for the error message.
+        intermediate_state_snapshot = self:_print_snapshot()
+      end
       intermediate_seen = true
     end
 
@@ -903,7 +915,7 @@ between asynchronous (feed(), nvim_input()) and synchronous API calls.
     if eof then
       err = err .. '\n\n' .. eof[2]
     end
-    busted.fail(err .. '\n\nSnapshot:\n' .. self:_print_snapshot(), 3)
+    error(err .. '\n\nSnapshot:\n' .. self:_print_snapshot(), 3)
   elseif did_warn then
     if eof then
       print(eof[2])
@@ -913,10 +925,14 @@ between asynchronous (feed(), nvim_input()) and synchronous API calls.
     print(string.sub(tb, 1, index))
   end
 
-  if flags.intermediate then
-    assert(intermediate_seen, 'expected intermediate screen state before final screen state')
-  elseif flags.unchanged then
-    assert(not intermediate_seen, 'expected screen state to be unchanged')
+  if flags.intermediate and not intermediate_seen then
+    error('Expected intermediate screen state before final screen state', 3)
+  elseif flags.unchanged and intermediate_seen then
+    error(
+      'Expected screen state to be unchanged.\nIntermediate screen state:\n'
+        .. intermediate_state_snapshot,
+      3
+    )
   end
 end
 
@@ -1356,7 +1372,7 @@ function Screen:_handle_option_set(name, value)
 end
 
 function Screen:_handle_chdir(path)
-  self.pwd = vim.fs.normalize(path, { expand_env = false })
+  self.pwd = vim.fs.normalize(path, { plain = true })
 end
 
 function Screen:_handle_popupmenu_show(items, selected, row, col, grid)
@@ -1375,7 +1391,7 @@ function Screen:_handle_cmdline_show(content, pos, firstc, prompt, indent, level
   if firstc == '' then
     firstc = nil
   end
-  if prompt == '' then
+  if hl_id == -1 then
     prompt = nil
   end
   if indent == 0 then
@@ -1437,10 +1453,16 @@ function Screen:_handle_wildmenu_hide()
   self.wildmenu_items, self.wildmenu_pos = nil, nil
 end
 
-function Screen:_handle_msg_show(kind, chunks, replace_last, history, append, id, progress)
+function Screen:_handle_msg_show(kind, chunks, replace_last, history, append, id, trigger)
   local pos = #self.messages
   if not replace_last or pos == 0 then
     pos = pos + 1
+  end
+  for i, msg in pairs(self.messages) do
+    if id ~= -1 and msg.id == id then
+      pos = i
+      break
+    end
   end
   self.messages[pos] = {
     kind = kind,
@@ -1448,7 +1470,7 @@ function Screen:_handle_msg_show(kind, chunks, replace_last, history, append, id
     history = history,
     append = append,
     id = id,
-    progress = progress,
+    trigger = trigger,
   }
 end
 
@@ -1557,7 +1579,7 @@ local function hl_id_to_name(self, id)
   return id and self.hl_names[id] or nil
 end
 
-function Screen:_extstate_repr(attr_state)
+function Screen:_extstate_repr(attr_state, exp)
   local cmdline = {}
   for i, entry in pairs(self.cmdline) do
     entry = shallowcopy(entry)
@@ -1575,13 +1597,24 @@ function Screen:_extstate_repr(attr_state)
 
   local messages = {}
   for i, entry in ipairs(self.messages) do
+    local exp_msg = exp and exp.messages and exp.messages[i]
+    -- Late addition, only include when expected state includes it.
+    local trigger = nil
+    if exp_msg and exp_msg.trigger ~= nil then
+      trigger = entry.trigger
+    end
+    -- Progress messages are identified by their id, so always show it for them.
+    local id = nil
+    if entry.kind == 'progress' or (exp_msg and exp_msg.id ~= nil) then
+      id = entry.id
+    end
     messages[i] = {
       kind = entry.kind,
       content = self:_chunks_repr(entry.content, attr_state),
       history = entry.history or nil,
       append = entry.append or nil,
-      id = entry.kind == 'progress' and entry.id or nil,
-      progress = entry.kind == 'progress' and entry.progress or nil,
+      id = id,
+      trigger = trigger,
     }
   end
 
@@ -1622,7 +1655,7 @@ function Screen:_chunks_repr(chunks, attr_state)
     local hl, text, id = unpack(chunk)
     local attrs
     if self._options.ext_linegrid then
-      attrs = self._attr_table[hl][1]
+      attrs = (self._attr_table[hl] or {})[1] -- Tolerate undefined hl_id in a snapshot render.
     else
       attrs = hl
     end
@@ -1787,9 +1820,14 @@ local function fmt_ext_state(name, state)
   elseif name == 'float_pos' then
     local str = '{\n'
     for k, v in pairs(state) do
-      str = str .. '  [' .. k .. '] = {' .. v[1]
-      for i = 2, #v do
-        str = str .. ', ' .. inspect(v[i])
+      str = str .. '  [' .. k .. '] = {'
+      if v.external then
+        str = str .. ' external = true '
+      else
+        str = str .. v[1]
+        for i = 2, #v do
+          str = str .. ', ' .. inspect(v[i])
+        end
       end
       str = str .. '};\n'
     end
@@ -1814,7 +1852,7 @@ function Screen:_print_snapshot()
         dict = '{ ' .. self:_pprint_attrs(a) .. ' }'
       end
       local keyval = (type(i) == 'number') and '[' .. tostring(i) .. ']' or i
-      if not (type(i) == 'number' and modify_attrs and i <= 30) then
+      if not (type(i) == 'number' and modify_attrs and i <= 31) then
         table.insert(attrstrs, '  ' .. keyval .. ' = ' .. dict .. ',')
       end
       if modify_attrs then
@@ -2014,6 +2052,11 @@ function Screen:_get_attr_id(attr_state, attrs, hl_id)
       return nil
     elseif id ~= nil then
       return id
+    end
+    if self._attr_table[hl_id] == nil then
+      -- Grid references a hl_id that was never defined via "hl_attr_define".
+      -- TODO(justinmk): maybe an Nvim core bug. https://github.com/neovim/neovim/issues/36250
+      return ('UNKNOWN_HL_ID(%d)'):format(hl_id)
     end
     if attr_state.mutable then
       id = self:_insert_hl_id(attr_state, hl_id)

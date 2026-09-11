@@ -229,13 +229,13 @@ func Test_blob_compare()
       VAR b1 = 0z0011
       echo b1 == 9
   END
-  call CheckLegacyAndVim9Failure(lines, ['E977:', 'E1072', 'E1072'])
+  call CheckLegacyAndVim9Failure(lines, ['E977:', 'E1072:', 'E1072:'])
 
   let lines =<< trim END
       VAR b1 = 0z0011
       echo b1 != 9
   END
-  call CheckLegacyAndVim9Failure(lines, ['E977:', 'E1072', 'E1072'])
+  call CheckLegacyAndVim9Failure(lines, ['E977:', 'E1072:', 'E1072:'])
 
   let lines =<< trim END
       VAR b1 = 0z0011
@@ -882,6 +882,52 @@ func Test_indexof()
   call assert_fails('let i = indexof(b, "val == 0xde")', 'E121:')
   call assert_fails('let i = indexof(b, {})', 'E1256:')
   call assert_fails('let i = indexof(b, " ")', 'E15:')
+endfunc
+
+" Test for using the items() function with a blob
+func Test_blob_items()
+  let lines =<< trim END
+    call assert_equal([[0, 0xAA], [1, 0xBB], [2, 0xCC]], 0zAABBCC->items())
+    call assert_equal([[0, 0]], 0z00->items())
+    call assert_equal([], 0z->items())
+    call assert_equal([], v:_null_blob->items())
+  END
+  call CheckSourceLegacyAndVim9Success(lines)
+endfunc
+
+" Test for setting a byte in a blob with invalid value
+func Test_blob_byte_set_invalid_value()
+  let lines =<< trim END
+    VAR b = 0zD0C3E4E18E1B
+    LET b[0] = 229539777187355
+  END
+  call CheckSourceLegacyAndVim9Failure(lines, 'E1239: Invalid value for blob:')
+endfunc
+
+func Test_blob_utf16be_encoding()
+  CheckFeature iconv
+
+  " Write utf-16be
+  new
+  setl nobomb
+  call setline(1, "A\u3042")
+  write ++enc=utf-16be ++ff=unix Xutf16be
+  defer delete('Xutf16be')
+  bwipe!
+
+  let bytes = readblob('Xutf16be')
+  " 'A' = U+0041 -> 00 41 (BE), U+3042 -> 30 42 (BE)
+  call assert_equal(0z0041.3042, bytes[0:3])
+
+  " iconv
+  let s = "A\u3042Z"
+  let be = iconv(s, 'utf-8', 'utf-16be')
+  if be == s
+    " iconv lacks utf-16be support
+    return
+  endif
+  call assert_equal(s, iconv(be, 'utf-16be', 'utf-8'))
+  call assert_notequal(be, iconv(s, 'utf-8', 'utf-16le'))
 endfunc
 
 " vim: shiftwidth=2 sts=2 expandtab

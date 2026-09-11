@@ -3,6 +3,7 @@
 #include <stdbool.h>
 
 #include "nvim/fold_defs.h"
+#include "nvim/pos_defs.h"
 #include "nvim/sign_defs.h"
 
 /// 'statusline' item flags
@@ -44,6 +45,7 @@ typedef enum {
   STL_TRUNCMARK       = '<',  ///< Truncation mark if line is too long.
   STL_USER_HL         = '*',  ///< Highlight from (User)1..9 or 0.
   STL_HIGHLIGHT       = '#',  ///< Highlight name.
+  STL_HIGHLIGHT_COMB  = '$',  ///< Highlight name (combining previous attrs).
   STL_TABPAGENR       = 'T',  ///< Tab page label nr.
   STL_TABCLOSENR      = 'X',  ///< Tab page close nr.
   STL_CLICK_FUNC      = '@',  ///< Click region start.
@@ -60,6 +62,11 @@ typedef struct {
   int tabnr;   ///< Tab page number.
   char *func;  ///< Function to run.
 } StlClickDefinition;
+
+typedef struct {
+  StlClickDefinition *def;  ///< Click definition.
+  size_t size;              ///< Click definition size.
+} StcClick;
 
 /// Used for tabline clicks
 typedef struct {
@@ -83,22 +90,26 @@ struct stl_item {
   int minwid;              ///< The minimum width of the item
   int maxwid;              ///< The maximum width of the item
   enum {
+    Disabled,
     Normal,
-    Empty,
+    NormalEmpty,
     Group,
     Separate,
+    Trunc,
+    Expression,
     Highlight,
+    HighlightCombining,
     HighlightSign,
     HighlightFold,
     TabPage,
     ClickFunc,
-    Trunc,
   } type;
 };
 
 /// Struct to hold info for 'statuscolumn'
 typedef struct {
   int width;                           ///< width of the status column
+  linenr_T lnum;                       ///< buffer line being drawn
   int sign_cul_id;                     ///< cursorline sign highlight id
   bool draw;                           ///< whether to draw the statuscolumn
   stl_hlrec_t *hlrec;                  ///< highlight groups

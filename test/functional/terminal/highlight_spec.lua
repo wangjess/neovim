@@ -3,6 +3,7 @@ local n = require('test.functional.testnvim')()
 local Screen = require('test.functional.ui.screen')
 local tt = require('test.functional.testterm')
 
+local describe, it, before_each = t.describe, t.it, t.before_each
 local assert_alive = n.assert_alive
 local feed, clear = n.feed, n.clear
 local api = n.api
@@ -58,7 +59,6 @@ describe(':terminal highlight', function()
       end)
 
       local function pass_attrs()
-        skip(is_os('win'))
         screen:expect(sub([[
           tty ready                                         |
           {NUM:text}text^                                          |
@@ -70,7 +70,6 @@ describe(':terminal highlight', function()
       it('will pass the corresponding attributes', pass_attrs)
 
       it('will pass the corresponding attributes on scrollback', function()
-        skip(is_os('win'))
         pass_attrs()
         local lines = {}
         for i = 1, 8 do
@@ -244,11 +243,6 @@ it('CursorLine and CursorColumn work in :terminal buffer in Normal mode', functi
                                                       |
   ]])
 
-  -- Skip the rest of these tests on Windows #31587
-  if is_os('win') then
-    return
-  end
-
   -- CursorLine and CursorColumn are combined with terminal colors.
   tt.set_reverse()
   tt.feed_data(' foobar')
@@ -338,16 +332,40 @@ describe(':terminal highlight forwarding', function()
       {1:-- TERMINAL --}                                    |
     ]])
   end)
+
+  it('handles truecolor SGR with a colour space id', function()
+    skip(is_os('win'))
+    tt.feed_termcode('[38:2::255:128:0m')
+    tt.feed_data('color')
+    tt.clear_attrs()
+    tt.feed_data('text')
+    screen:expect([[
+      tty ready                                         |
+      {3:color}text^                                         |
+                                                        |*4
+      {1:-- TERMINAL --}                                    |
+    ]])
+  end)
 end)
 
-describe(':terminal highlight with custom palette', function()
+--- @param buflocal boolean
+local function test_term_hl_custom_palette(buflocal)
   local screen
 
   before_each(function()
     clear()
     screen = Screen.new(50, 7, { rgb = true })
-    api.nvim_set_var('terminal_color_3', '#123456')
-    command(("enew | call jobstart(['%s'], {'term':v:true})"):format(testprg('tty-test')))
+    command('enew')
+    if buflocal then
+      api.nvim_buf_set_var(0, 'terminal_color_3', '#123456')
+    else
+      api.nvim_set_var('terminal_color_3', '#123456')
+    end
+    screen:add_extra_attr_ids({ [100] = { foreground = tonumber('0x123456') } })
+  end)
+
+  it('will use the custom color with jobstart()', function()
+    command(("call jobstart(['%s'], {'term': v:true})"):format(testprg('tty-test')))
     feed('i')
     screen:expect([[
       tty ready                                         |
@@ -355,21 +373,38 @@ describe(':terminal highlight with custom palette', function()
                                                         |*4
       {5:-- TERMINAL --}                                    |
     ]])
-  end)
-
-  it('will use the custom color', function()
-    skip(is_os('win'))
     tt.set_fg(3)
     tt.feed_data('text')
     tt.clear_attrs()
     tt.feed_data('text')
-    screen:add_extra_attr_ids({ [100] = { foreground = tonumber('0x123456') } })
     screen:expect([[
       tty ready                                         |
       {100:text}text^                                          |
                                                         |*4
       {5:-- TERMINAL --}                                    |
     ]])
+  end)
+
+  it('will use the custom color with nvim_open_term() in non-curbuf', function()
+    local oldbuf = api.nvim_get_current_buf()
+    command('set laststatus=0 | vnew')
+    local chan = api.nvim_open_term(oldbuf, {})
+    api.nvim_chan_send(chan, '\027[38;5;3mtext\027[0;10mtext')
+    screen:expect([[
+      ^                         │{100:text}text                |
+      {1:~                        }│                        |*5
+                                                        |
+    ]])
+  end)
+end
+
+describe(':terminal highlight with custom palette', function()
+  describe('using g:termimal_color_*', function()
+    test_term_hl_custom_palette(false)
+  end)
+
+  describe('using b:termimal_color_*', function()
+    test_term_hl_custom_palette(true)
   end)
 end)
 

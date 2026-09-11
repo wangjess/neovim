@@ -1,7 +1,7 @@
 *quickfix.txt*  Nvim
 
 
-		  VIM REFERENCE MANUAL    by Bram Moolenaar
+		  VIM REFERENCE MANUAL	  by Bram Moolenaar
 
 
 This subject is introduced in section |30.1| of the user manual.
@@ -190,15 +190,15 @@ processing a quickfix or location list command, it will be aborted.
 			the [count] next error.  See |:cc| for [!] and
 			'switchbuf'.
 
-							*]CTRL-Q*
-]CTRL-Q			Mapped to |:cnfile|. |default-mappings|
+							*]_CTRL-Q*
+]_CTRL-Q		Mapped to |:cnfile|. |default-mappings|
 
 							*:lnf* *:lnfile*
 :[count]lnf[ile][!]	Same as ":cnfile", except the location list for the
 			current window is used instead of the quickfix list.
 
-							*]CTRL-L*
-]CTRL-L			Mapped to |:lnfile|. |default-mappings|
+							*]_CTRL-L*
+]_CTRL-L			Mapped to |:lnfile|. |default-mappings|
 
 :[count]cNf[ile][!]			*:cpf* *:cpfile* *:cNf* *:cNfile*
 :[count]cpf[ile][!]	Display the last error in the [count] previous file in
@@ -207,8 +207,8 @@ processing a quickfix or location list command, it will be aborted.
 			the [count] previous error.  See |:cc| for [!] and
 			'switchbuf'.
 
-								*[CTRL-Q*
-[CTRL-Q			Mapped to |:cpfile|. |default-mappings|
+								*[_CTRL-Q*
+[_CTRL-Q		Mapped to |:cpfile|. |default-mappings|
 
 
 :[count]lNf[ile][!]			*:lpf* *:lpfile* *:lNf* *:lNfile*
@@ -216,8 +216,8 @@ processing a quickfix or location list command, it will be aborted.
 			list for the current window is used instead of the
 			quickfix list.
 
-							*[CTRL-L*
-[CTRL-L			Mapped to |:lpfile|. |default-mappings|
+							*[_CTRL-L*
+[_CTRL-L		Mapped to |:lpfile|. |default-mappings|
 
 							*:crewind* *:cr*
 :cr[ewind][!] [nr]	Display error [nr].  If [nr] is omitted, the FIRST
@@ -515,8 +515,8 @@ entries parsed from lines.  The following shows how to use a custom
 
 EXECUTE A COMMAND IN ALL THE BUFFERS IN QUICKFIX OR LOCATION LIST:
 							*:cdo*
-:cdo[!] {cmd}		Execute {cmd} in each valid entry in the quickfix list.
-			It works like doing this: >
+:cdo[!] {cmd}		Execute {cmd} in each valid entry in the quickfix
+			list.  It works like doing this: >
 				:cfirst
 				:{cmd}
 				:cnext
@@ -649,6 +649,10 @@ can go back to the unfiltered list using the |:colder|/|:lolder| command.
 			errors.  If the window is already open and there are
 			no recognized errors, close the window.
 
+			When opening the window and [height] is given, the
+			window becomes that high (if there is room).  When
+			[height] is omitted the window is made ten lines high.
+
 							*:lw* *:lwindow*
 :lw[indow] [height]	Same as ":cwindow", except use the window showing the
 			location list for the current window.
@@ -664,10 +668,7 @@ can go back to the unfiltered list using the |:colder|/|:lolder| command.
 :lbo[ttom]		Same as ":cbottom", except use the window showing the
 			location list for the current window.
 
-Normally the quickfix window is at the bottom of the screen.  If there are
-vertical splits, it's at the bottom of the rightmost column of windows.  To
-make it always occupy the full width: >
-	:botright cwindow
+Normally the quickfix window is at the bottom of the screen.
 You can move the window around with |window-moving| commands.
 For example, to move it to the top: CTRL-W K
 The 'winfixheight' option will be set, which means that the window will mostly
@@ -706,6 +707,15 @@ to find a window to edit the file:
    is used.
 6. If the above step fails, then a new horizontally split window above the
    quickfix window is used.
+
+						*quickfix-winfixbuf*
+When 'winfixbuf' is set for the window that would be used to display the
+error, jumping to an error in another buffer is not possible in that window.
+For a quickfix list Vim then looks for another suitable window, using the
+previously accessed window if it does not have 'winfixbuf' set, and otherwise
+splits a new window.  For a location list this fails with |E1513|, because a
+location list is tied to its window and cannot move to or split off another
+one.  Using [!] skips these checks.
 
 					*CTRL-W_<Enter>* *CTRL-W_<CR>*
 You can use CTRL-W <Enter> to open a new window and jump to the error there.
@@ -1303,6 +1313,17 @@ For writing a compiler plugin, see |write-compiler-plugin|.
 
 Use the |compiler-make| plugin to undo the effect of a compiler plugin.
 
+BIOME				      *compiler-biome* *quickfix-biome*
+
+Biome check lints JavaScript, TypeScript, JSX, TSX, JSON, JSONC, HTML, Vue,
+Svelte, Astro, CSS, GraphQL and GritQL files.
+
+Commonly used compiler options can be added to 'makeprg' by setting the
+b/g:biome_makeprg_params variable.  For example (global default is ""): >
+
+  let b:biome_makeprg_params = "--diagnostic-level=error --staged"
+
+
 CPPCHECK			*quickfix-cppcheck* *compiler-cppcheck*
 
 Use g/b:`c_cppcheck_params` to set cppcheck parameters.  The global
@@ -1641,6 +1662,22 @@ b/g:mypy_makeprg_params variable.  For example: >
 
 The global default is "--strict --ignore-missing-imports".
 
+PYRIGHT TYPE CHECKER					*compiler-pyright*
+
+Commonly used compiler options can be added to 'makeprg' by setting the
+b/g:pyright_makeprg_params variable.
+
+The global default is "pyright".
+
+TY TYPE CHECKER					*compiler-ty*
+
+Commonly used compiler options and executable can be set by the
+b/g:ty_makeprg variable.  For example: >
+
+	let b:ty_makeprg = "uv run ty"
+
+The global default is "ty --no-progress --color=never".
+
 RUFF LINTER						*compiler-ruff*
 
 Commonly used compiler options can be added to 'makeprg' by setting the
@@ -1787,9 +1824,9 @@ Basic items
 	%c		column number (finds a number representing character
 			column of the error, byte index, a <tab> is 1
 			character column)
-	%v		virtual column number (finds a number representing
-			screen column of the error (1 <tab> == 8 screen
-			columns))
+	%v		virtual column number (finds a number representing the
+			screen column of the error, where a <tab> is always 8
+			screen columns regardless of 'tabstop')
 	%k		end column number (finds a number representing
 			the character column of the error, byte index, or a
 			number representing screen end column of the error if
@@ -1799,6 +1836,8 @@ Basic items
 			    w - warning message
 			    i - info message
 			    n - note message
+			The uppercase letters E, W, I and N are also
+			recognized and have the same meaning.
 	%n		error number (finds a number)
 	%m		error message (finds a string)
 	%r		matches the "rest" of a single-line file message %O/P/Q
@@ -2002,9 +2041,9 @@ case they have to precede the letter, e.g. '%+A' or '%-G':
 	%-		do not include the matching multi-line in any output
 	%+		include the whole matching line in the %m error string
 
-One prefix is only useful in combination with '+' or '-', namely %G.  It parses
-over lines containing general information like compiler version strings or
-other headers that can be skipped.
+One prefix is only useful in combination with '+' or '-', namely %G.  It
+parses over lines containing general information like compiler version strings
+or other headers that can be skipped.
 	%-G		ignore this message
 	%+G		general message
 
@@ -2170,8 +2209,8 @@ prints information about entering a directory in the form "Making all in dir".
    Making all in dir2		  ./dir1/dir2
    Making all in dir2		  ./dir1/dir2
 
-   This can be solved by printing absolute directories in the "enter directory"
-   message or by printing "leave directory" messages.
+   This can be solved by printing absolute directories in the "enter
+   directory" message or by printing "leave directory" messages.
 
 To avoid this problem, ensure to print absolute directory names and "leave
 directory" messages.
@@ -2284,7 +2323,7 @@ remove the comment lines.  For the '\' notation at the start of some lines see
 	\%E!\ %m,
 <		Start of multi-line warning messages; the first two also
 		include the line number.  Meaning of some regular expressions:
-		  - "%.%#"  (".*")   matches a (possibly empty) string
+		  - "%.%#"  (`.*`)   matches a (possibly empty) string
 		  - "%*\\d" ("\d\+") matches a number >
 	\%+WLaTeX\ %.%#Warning:\ %.%#line\ %l%.%#,
 	\%+W%.%#\ at\ lines\ %l--%*\\d,

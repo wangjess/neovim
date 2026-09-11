@@ -1,5 +1,6 @@
 local t = require('test.testutil')
 
+local describe, it = t.describe, t.it
 local eq = t.eq
 local matches = t.matches
 local pcall_err = t.pcall_err
@@ -196,6 +197,26 @@ describe('vim.iter', function()
     end
   end)
 
+  it('skip(predicate) preserves first non-matching element', function()
+    local it = vim.iter(vim.gsplit('1|2|3|4', '|'))
+
+    it:skip(function(x)
+      return tonumber(x) < 3
+    end)
+
+    eq('3', it:next())
+    eq('4', it:next())
+  end)
+
+  it('skip() followed by peek() works correctly', function()
+    local it = vim.iter(vim.gsplit('a|b|c|d', '|'))
+
+    it:skip(2)
+
+    eq('c', it:peek())
+    eq('c', it:next())
+  end)
+
   it('rskip()', function()
     do
       local q = { 4, 3, 2, 1 }
@@ -297,6 +318,16 @@ describe('vim.iter', function()
           :totable()
       )
       eq({ 4, 3, 2, 1 }, vim.iter(q):take(correct):totable())
+    end
+
+    do
+      local q = { 4, 3, 2, 1 }
+      local function positive(x)
+        return x > 0
+      end
+
+      eq({ 4, 3, 2, 1 }, vim.iter(q):take(positive):totable())
+      eq({ 1, 2, 3, 4 }, vim.iter(q):rev():take(positive):totable())
     end
 
     do
@@ -434,8 +465,86 @@ describe('vim.iter', function()
 
     do
       local it = vim.iter(vim.gsplit('hi', ''))
-      matches('peek%(%) requires an array%-like table', pcall_err(it.peek, it))
+      eq('h', it:peek())
+      eq('h', it:peek())
+      eq('h', it:next())
+      eq('i', it:peek())
+      eq('i', it:next())
     end
+  end)
+
+  it('peek() does not consume on function iterators', function()
+    local it = vim.iter(vim.gsplit('a|b|c', '|'))
+
+    eq('a', it:peek())
+    eq('a', it:peek())
+    eq('a', it:next())
+    eq('b', it:next())
+  end)
+
+  it('peek() before skip(predicate) does not break iteration', function()
+    local it = vim.iter(vim.gsplit('1|2|3|4', '|'))
+
+    eq('1', it:peek())
+
+    it:skip(function(x)
+      return tonumber(x) < 3
+    end)
+
+    eq('3', it:next())
+  end)
+
+  it('multiple peek() calls after next()', function()
+    local it = vim.iter(vim.gsplit('a|b|c', '|'))
+
+    eq('a', it:next())
+    eq('b', it:peek())
+    eq('b', it:peek())
+    eq('b', it:next())
+    eq('c', it:next())
+  end)
+
+  describe('peek() with multi-value returns', function()
+    it('peek() preserves multiple return values from ipairs()', function()
+      local it = vim.iter(ipairs({ 'a', 'b', 'c' }))
+      local i1, v1 = it:peek()
+
+      eq(1, i1)
+      eq('a', v1)
+
+      local i2, v2 = it:next()
+
+      eq(1, i2)
+      eq('a', v2)
+    end)
+
+    it('peek() works with pairs() returning multiple values', function()
+      local tbl = { x = 10, y = 20 }
+      local it = vim.iter(pairs(tbl))
+      local k1, v1 = it:peek()
+      local k2, v2 = it:peek()
+
+      eq(k1, k2)
+      eq(v1, v2)
+    end)
+  end)
+
+  describe('peek() after transformations', function()
+    it('peek() works after map() on function iterator', function()
+      local it = vim.iter(vim.gsplit('1|2|3', '|')):map(tonumber)
+
+      eq(1, it:peek())
+      eq(1, it:next())
+      eq(2, it:peek())
+    end)
+
+    it('peek() at end of iterator returns nil', function()
+      local it = vim.iter({ 1 })
+
+      eq(1, it:next())
+      eq(nil, it:peek())
+      eq(nil, it:next())
+    end)
   end)
 
   it('find()', function()
@@ -579,6 +688,64 @@ describe('vim.iter', function()
     eq({ 1, { a = 2 }, { nil }, 3 }, nested_non_lists:flatten():totable())
     -- only error if we're going deep enough to flatten a dict-like table
     matches(flat_err, pcall_err(nested_non_lists.flatten, nested_non_lists, math.huge))
+  end)
+
+  it('unique()', function()
+    eq({ 1, 2, 3, 4, 5 }, vim.iter({ 1, 2, 2, 3, 4, 4, 5 }):unique():totable())
+    eq(
+      { 1, 2, 3, 4, 5 },
+      vim.iter({ 1, 2, 3, 4, 4, 5, 1, 2, 3, 2, 1, 2, 3, 4, 5 }):unique():totable()
+    )
+    eq(
+      { { 1 }, { 2 }, { 3 } },
+      vim
+        .iter({ { 1 }, { 1 }, { 2 }, { 2 }, { 3 }, { 3 } })
+        :unique(function(x)
+          return x[1]
+        end)
+        :totable()
+    )
+  end)
+
+  it('count()', function()
+    local odd = function(v)
+      return v % 2 ~= 0
+    end
+
+    eq(0, vim.iter({}):count())
+
+    local q = { 1, 2, 3, 4, 5 }
+    eq(5, vim.iter(q):count())
+    eq(5, vim.iter(q):rev():count())
+    eq(3, vim.iter(q):filter(odd):count())
+
+    do
+      local it = vim.iter(q)
+      eq(5, it:count())
+      eq(0, it:count())
+      eq(nil, it:next())
+    end
+
+    local m = { a = 1, b = 2, c = 3 }
+    eq(3, vim.iter(m):count())
+    eq(
+      2,
+      vim
+        .iter(m)
+        :filter(function(_, v)
+          return odd(v)
+        end)
+        :count()
+    )
+
+    do
+      local it = vim.iter(m)
+      eq(3, it:count())
+      eq(0, it:count())
+      eq(nil, it:next())
+    end
+
+    eq(6, vim.iter(vim.split('123abc', '')):count())
   end)
 
   it('handles map-like tables', function()

@@ -6569,6 +6569,9 @@ func Test_type()
     call assert_false(v:true is 1)
     call assert_false(v:true is v:false)
     " call assert_false(v:none is 0)
+    " call assert_false(v:none is [])
+    " call assert_false(v:none is {})
+    " call assert_false(v:none is 'text')
     call assert_false(v:null is 0)
     " call assert_false(v:null is v:none)
 
@@ -7014,10 +7017,14 @@ func Test_compound_assignment_operators()
       call assert_equal(10.5, x)
       let x /= 2.5
       call assert_equal(4.2, x)
-      call assert_fails('let x %= 0.5', 'E734')
-      call assert_fails('let x .= "f"', 'E734')
+      call assert_fails('let x %= 0.5', 'E734:')
+      call assert_fails('let x .= "f"', 'E734:')
       let x = !3.14
-      call assert_equal(0.0, x)
+      call assert_equal(0, x)
+      call assert_equal(1, !!1.0)
+      let x = !0.0
+      call assert_equal(1, x)
+      call assert_equal(0, !!0.0)
 
       " integer and float operations
       let x = 1
@@ -7611,6 +7618,33 @@ func Test_catch_pattern_trailing_chars()
   endtry
   call assert_true(caught_exception)
   bw!
+endfunc
+
+" Test using fullcommand() {{{1
+func Test_builtin_fullcommand()
+  " :hor is the minimum abbreviation of :horizontal; :ho is invalid
+  call assert_equal('', fullcommand('ho'))
+  call assert_equal('horizontal', fullcommand('hor'))
+
+  " :k takes one {a-zA-Z'} mark argument and optional whitespace
+  call assert_equal('k', fullcommand('k'))
+  call assert_equal('k', fullcommand(':k'))
+  call assert_equal('k', fullcommand('karrrrrgh!'))
+
+  " :dl is "delete and list" in a legacy Vim script scope
+  call assert_equal('delete', fullcommand('dl'))
+
+  " :s two and three letter commands
+  call assert_equal('substitute', fullcommand('sIr'))
+  call assert_equal('substitute', fullcommand('sIrarrrrrgh!'))
+
+  " :finally
+  call assert_equal('finally', fullcommand('fina'))
+    " 'final' - returns 'final', a Vim9 script-exclusive keyword
+    "         - is a valid shortening of :finally in legacy Vim script
+    "call assert_equal('final', fullcommand('final'))
+  call assert_equal('finally', fullcommand('finall'))
+
 endfunc
 
 "-------------------------------------------------------------------------------

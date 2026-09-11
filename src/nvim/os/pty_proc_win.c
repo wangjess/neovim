@@ -8,44 +8,46 @@
 #include "nvim/log.h"
 #include "nvim/mbyte.h"
 #include "nvim/memory.h"
+#include "nvim/os/fs.h"
 #include "nvim/os/os.h"
 #include "nvim/os/pty_conpty_win.h"
 #include "nvim/os/pty_proc_win.h"
+#include "nvim/path.h"
 
 #include "os/pty_proc_win.c.generated.h"
 
 static void CALLBACK pty_proc_terminate_cb(void *context, BOOLEAN unused)
   FUNC_ATTR_NONNULL_ALL
 {
-  PtyProc *ptyproc = (PtyProc *)context;
-  Proc *proc = (Proc *)ptyproc;
-
-  os_conpty_free(ptyproc->conpty);
+  Proc *proc = (Proc *)context;
   // NB: pty_proc_terminate_cb() is called on a separate thread,
   // but finishing up the process needs to be done on the main thread.
-  loop_schedule_fast(proc->loop, event_create(pty_proc_finish_when_eof, ptyproc));
+  loop_schedule_fast(proc->loop, event_create(pty_proc_finish, context));
 }
 
-static void pty_proc_finish_when_eof(void **argv)
-  FUNC_ATTR_NONNULL_ALL
+/// Create a separate thread to call ClosePseudoConsole,
+/// which allows us to flush the final frame on the main thread.
+/// See https://learn.microsoft.com/en-us/windows/console/creating-a-pseudoconsole-session#ending-the-pseudoconsole-session
+static void pty_proc_close_console(Stream *stream, void *data)
 {
-  PtyProc *ptyproc = (PtyProc *)argv[0];
-
-  if (ptyproc->finish_wait != NULL) {
-    if (pty_proc_can_finish(ptyproc)) {
-      pty_proc_finish(ptyproc);
-    } else {
-      uv_timer_start(&ptyproc->wait_eof_timer, wait_eof_timer_cb, 200, 200);
-    }
-  }
-}
-
-static bool pty_proc_can_finish(PtyProc *ptyproc)
-{
+  PtyProc *ptyproc = stream->internal_data;
   Proc *proc = (Proc *)ptyproc;
-
-  assert(ptyproc->finish_wait != NULL);
-  return proc->out.s.closed || proc->out.did_eof || !uv_is_readable(proc->out.s.uvstream);
+  if (ptyproc->conpty == NULL) {
+    return;
+  }
+  // On Windows 11, closing a terminal immediately after opening it can leave orphan conhost
+  // and shell processes, e.g. `during TermClose event` case in autocmd_spec.lua
+  // Checking `num_bytes` is an attempt to detect that, until we find a better way.
+  if (proc->out.num_bytes == 0) {
+    TerminateProcess(ptyproc->proc_handle, 0);
+  }
+  uv_thread_t tid;
+  uv_thread_create(&tid, os_conpty_free, ptyproc->conpty);
+  while (!proc->out.did_eof && WaitForSingleObject(tid, 0) == WAIT_TIMEOUT) {
+    uv_run(&proc->loop->uv, UV_RUN_ONCE);
+  }
+  uv_thread_detach(&tid);
+  ptyproc->conpty = NULL;
 }
 
 /// @returns zero on success, or negative error code.
@@ -60,6 +62,7 @@ int pty_proc_spawn(PtyProc *ptyproc)
   HANDLE proc_handle = NULL;
   uv_connect_t *in_req = NULL;
   uv_connect_t *out_req = NULL;
+  wchar_t *file = NULL;
   wchar_t *cmd_line = NULL;
   wchar_t *cwd = NULL;
   wchar_t *env = NULL;
@@ -98,8 +101,28 @@ int pty_proc_spawn(PtyProc *ptyproc)
     }
   }
 
-  status = build_cmd_line(proc->argv, &cmd_line,
-                          os_shell_is_cmdexe(proc->argv[0]));
+  // cmd.exe can’t recognize forward slash in argv[0] during
+  // initialization, so we keep only cmd.exe in the cmd_line
+  // and pass fullpath via lpApplicationName to avoid hijacking.
+  // See https://www.microsoft.com/en-us/msrc/blog/2014/04/ms14-019-fixing-a-binary-hijacking-via-cmd-or-bat-file
+  bool is_cmdexe = os_shell_is_cmdexe(proc->argv[0]);
+  if (is_cmdexe) {
+    char *path = NULL;
+    // TODO(ntdiary): Could put the search logic in one place.
+    // See https://github.com/neovim/neovim/issues/36818#issuecomment-3977147445
+    if (!os_can_exe(proc->argv[0], &path, true)) {
+      status = UV_ENOENT;
+      emsg = "executable not found";
+      goto cleanup;
+    }
+    status = utf8_to_utf16(path, -1, &file);
+    if (status != 0) {
+      emsg = "utf8_to_utf16(proc->argv[0]) failed";
+      goto cleanup;
+    }
+    xfree(path);
+  }
+  status = build_cmd_line(proc->argv, &cmd_line, is_cmdexe);
   if (status != 0) {
     emsg = "build_cmd_line failed";
     goto cleanup;
@@ -116,7 +139,7 @@ int pty_proc_spawn(PtyProc *ptyproc)
 
   if (!os_conpty_spawn(conpty_object,
                        &proc_handle,
-                       NULL,
+                       file,
                        cmd_line,
                        cwd,
                        env)) {
@@ -126,8 +149,6 @@ int pty_proc_spawn(PtyProc *ptyproc)
   }
   proc->pid = (int)GetProcessId(proc_handle);
 
-  uv_timer_init(&proc->loop->uv, &ptyproc->wait_eof_timer);
-  ptyproc->wait_eof_timer.data = (void *)ptyproc;
   if (!RegisterWaitForSingleObject(&ptyproc->finish_wait,
                                    proc_handle,
                                    pty_proc_terminate_cb,
@@ -143,6 +164,7 @@ int pty_proc_spawn(PtyProc *ptyproc)
     uv_run(&proc->loop->uv, UV_RUN_ONCE);
   }
 
+  proc->out.s.before_close_cb = pty_proc_close_console;
   ptyproc->conpty = conpty_object;
   ptyproc->proc_handle = proc_handle;
   conpty_object = NULL;
@@ -163,6 +185,7 @@ cleanup:
   }
   xfree(in_req);
   xfree(out_req);
+  xfree(file);
   xfree(cmd_line);
   xfree(env);
   xfree(cwd);
@@ -180,6 +203,16 @@ void pty_proc_resize(PtyProc *ptyproc, uint16_t width, uint16_t height)
   os_conpty_set_size(ptyproc->conpty, width, height);
 }
 
+void pty_proc_resume(PtyProc *ptyproc)
+  FUNC_ATTR_NONNULL_ALL
+{
+}
+
+void pty_proc_flush_master(PtyProc *ptyproc)
+  FUNC_ATTR_NONNULL_ALL
+{
+}
+
 void pty_proc_close(PtyProc *ptyproc)
   FUNC_ATTR_NONNULL_ALL
 {
@@ -190,7 +223,6 @@ void pty_proc_close(PtyProc *ptyproc)
   if (ptyproc->finish_wait != NULL) {
     UnregisterWaitEx(ptyproc->finish_wait, NULL);
     ptyproc->finish_wait = NULL;
-    uv_close((uv_handle_t *)&ptyproc->wait_eof_timer, NULL);
   }
   if (ptyproc->proc_handle != NULL) {
     CloseHandle(ptyproc->proc_handle);
@@ -219,19 +251,10 @@ static void pty_proc_connect_cb(uv_connect_t *req, int status)
   req->handle = NULL;
 }
 
-static void wait_eof_timer_cb(uv_timer_t *wait_eof_timer)
+static void pty_proc_finish(void **argv)
   FUNC_ATTR_NONNULL_ALL
 {
-  PtyProc *ptyproc = wait_eof_timer->data;
-  if (pty_proc_can_finish(ptyproc)) {
-    uv_timer_stop(&ptyproc->wait_eof_timer);
-    pty_proc_finish(ptyproc);
-  }
-}
-
-static void pty_proc_finish(PtyProc *ptyproc)
-  FUNC_ATTR_NONNULL_ALL
-{
+  PtyProc *ptyproc = (PtyProc *)argv[0];
   Proc *proc = (Proc *)ptyproc;
 
   DWORD exit_code = 0;
@@ -261,7 +284,7 @@ static int build_cmd_line(char **argv, wchar_t **cmd_line, bool is_cmdexe)
     ArgNode *arg_node = xmalloc(sizeof(*arg_node));
     arg_node->arg = xmalloc(buf_len);
     if (is_cmdexe) {
-      xstrlcpy(arg_node->arg, *argv, buf_len);
+      xstrlcpy(arg_node->arg, argc == 0 ? "cmd.exe" : *argv, buf_len);
     } else {
       quote_cmd_arg(arg_node->arg, buf_len, *argv);
     }

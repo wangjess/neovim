@@ -8,6 +8,7 @@
 --    - NOTE: Only use this if your test actually needs the full lifecycle/capabilities of the
 --    builtin Nvim TUI. Most tests should just use `Screen.new()` directly, or plain old API calls.
 
+local t = require('test.testutil')
 local n = require('test.functional.testnvim')()
 local Screen = require('test.functional.ui.screen')
 
@@ -15,6 +16,8 @@ local testprg = n.testprg
 local exec_lua = n.exec_lua
 local api = n.api
 local nvim_prog = n.nvim_prog
+local retry = t.retry
+local eq = t.eq
 
 local M = {}
 
@@ -33,6 +36,8 @@ function M.feed_csi(data)
   M.feed_termcode('[' .. data)
 end
 
+--- @param session test.Session
+--- @return fun(code: string, ...):any
 function M.make_lua_executor(session)
   return function(code, ...)
     local status, rv = session:request('nvim_exec_lua', code, { ... })
@@ -44,7 +49,7 @@ function M.make_lua_executor(session)
   end
 end
 
--- some t for controlling the terminal. the codes were taken from
+-- some helpers for controlling the terminal. the codes were taken from
 -- infocmp xterm-256color which is less what libvterm understands
 -- civis/cnorm
 function M.hide_cursor()
@@ -114,7 +119,6 @@ function M.setup_screen(extra_rows, cmd, cols, env, screen_opts)
   cmd = cmd and cmd or default_command
   cols = cols and cols or 50
 
-  api.nvim_command('highlight TermCursor cterm=reverse')
   api.nvim_command('highlight StatusLineTerm ctermbg=2 ctermfg=0')
   api.nvim_command('highlight StatusLineTermNC ctermbg=2 ctermfg=8')
 
@@ -199,12 +203,45 @@ function M.setup_child_nvim(args, opts)
   opts = opts or {}
   local argv = { nvim_prog, unpack(args or {}) }
 
-  local env = opts.env or {}
-  if not env.VIMRUNTIME then
-    env.VIMRUNTIME = os.getenv('VIMRUNTIME')
-  end
+  local env = t.shallowcopy(opts.env) or {}
+  env.VIMRUNTIME = env.VIMRUNTIME or os.getenv('VIMRUNTIME')
+  env.NVIM_TEST = env.NVIM_TEST or os.getenv('NVIM_TEST')
+  -- Child servers need the socket dir set by runner.lua.
+  env.XDG_RUNTIME_DIR = env.XDG_RUNTIME_DIR or os.getenv('XDG_RUNTIME_DIR')
 
   return M.setup_screen(opts.extra_rows, argv, opts.cols, env)
+end
+
+--- FIXME: On Windows spaces at the end of a screen line may have wrong attrs.
+--- Remove this function when that's fixed.
+---
+--- @param screen test.functional.ui.screen
+function M.override_screen_expect_for_conpty(screen)
+  if not t.is_os('win') then
+    return
+  end
+  local orig_screen_expect = screen.expect
+  function screen.expect(self, expected, attr_ids, ...)
+    if type(expected) == 'string' then
+      expected = expected:gsub(' *%} +%|\n', '{MATCH: *}}{MATCH: *}|\n')
+      expected = expected:gsub('%}%^ +%|\n', '{MATCH:[ ^]*}}{MATCH:[ ^]*}|\n')
+    end
+    orig_screen_expect(self, expected, attr_ids, ...)
+  end
+end
+
+--- Asserts that the exit code of chan eventually matches the expected exit code
+---
+--- @param code integer expected exit code
+--- @param chan? integer channel id, defaults to current buffer's channel
+function M.expect_exitcode(code, chan)
+  chan = chan or api.nvim_get_option_value('channel', { buf = 0 }) or 0
+  eq(true, chan > 0, 'Expected a valid channel ID, but got: ' .. chan)
+
+  retry(nil, nil, function()
+    local info = api.nvim_get_chan_info(chan)
+    eq(code, info.exitcode)
+  end)
 end
 
 return M

@@ -1,4 +1,4 @@
-*develop.txt*          Nvim
+*dev.txt*          Nvim
 
 
                             NVIM REFERENCE MANUAL
@@ -78,10 +78,10 @@ include the kitchen sink... but it's good for plumbing."
 
 
 ==============================================================================
-Developer guidelines                                    *dev-guidelines*
+Developer guidelines                                          *dev-guidelines*
 
-
-PROVIDERS                                               *dev-provider*
+------------------------------------------------------------------------------
+Providers                                                       *dev-provider*
 
 A primary goal of Nvim is to allow extension of the editor without special
 knowledge in the core.  Some core functions are delegated to "providers"
@@ -92,7 +92,6 @@ Examples:
 1. In the Vim source code, clipboard logic accounts for more than 1k lines of
    C source code (ui.c), to perform two tasks that are now accomplished with
    shell commands such as xclip or pbcopy/pbpaste.
-
 2. Python scripting support: Vim has three files dedicated to embedding the
    Python interpreter: if_python.c, if_python3.c and if_py_both.h. Together
    these files sum about 9.5k lines of C source code. In contrast, Nvim Python
@@ -124,7 +123,8 @@ Sometimes a GUI or other application may want to force a provider to
     :runtime autoload/provider/clipboard.vim
 
 
-DOCUMENTATION                                           *dev-doc*
+------------------------------------------------------------------------------
+Documentation                                                        *dev-doc*
 
 - "Just say it". Avoid mushy, colloquial phrasing in all documentation
   (docstrings, user manual, website materials, newsletters, …). Don't mince
@@ -166,7 +166,7 @@ DOCUMENTATION                                           *dev-doc*
       `treesitter.txt`
     - Otherwise, add them to `lua.txt`
 
-Documentation format ~
+DOCUMENTATION FORMAT
 
 For Nvim-owned docs, use the following strict subset of "vimdoc" to ensure
 the help doc renders nicely in other formats (such as HTML:
@@ -177,10 +177,7 @@ Strict "vimdoc" subset:
 - Use lists (like this!) prefixed with "-" or "•", for adjacent lines that you
   don't want to auto-wrap. Lists are always rendered with "flow" layout
   (soft-wrapped) instead of preformatted (hard-wrapped) layout common in
-  legacy :help docs.
-  - Limitation: currently the parser https://github.com/neovim/tree-sitter-vimdoc
-    does not understand numbered listitems, so use a bullet symbol (- or •)
-    before numbered items, e.g. "• 1." instead of "1.".
+  legacy :help docs. You can also use numbered lists, e.g. "1."
 - Separate blocks (paragraphs) of content by a blank line.
 - Do not use indentation in random places—that prevents the page from using
   "flow" layout. If you need a preformatted section, put it in
@@ -188,7 +185,7 @@ Strict "vimdoc" subset:
 - Parameters and fields are documented as `{foo}`.
 - Optional parameters and fields are documented as `{foo}?`.
 
-C docstrings ~
+C DOCSTRINGS
 
 Nvim API documentation lives in the source code, as docstrings (doc
 comments) on the function definitions.  The |api| :help is generated
@@ -235,8 +232,7 @@ in src/nvim/api/win_config.c like this: >
     /// @return Window handle, or 0 on error
 
 
-Lua docstrings ~
-                                                        *dev-lua-doc*
+LUA DOCSTRINGS                                                   *dev-lua-doc*
 Lua documentation lives in the source code, as docstrings on the function
 definitions.  The |lua-vim| :help is generated from the docstrings.
 
@@ -251,7 +247,13 @@ Docstring format:
   "stable". If `<api-level>` is greater than the current stable release (or
   0), it is marked as "experimental".
   - See scripts/util.lua for the mapping of api-level to Nvim version.
+- Use `@deprecated` to mark deprecated functions.
 - Use `@nodoc` to prevent documentation generation.
+- Use `@private` for private functions.
+  - Naming a function with an underscore prefix ("_foo", not "foo") implies
+    `@nodoc` and `@private`.
+- Use `@internal` for non-public functions shared across Nvim modules, or
+  `@class (internal)` for shared internal types. Both hide generated docs.
 - Use `@inlinedoc` to inline `@class` blocks into `@param` blocks.
   E.g. >lua
       --- Object with fields:
@@ -275,10 +277,11 @@ Docstring format:
                       - {somefield}? (integer) Documentation
                         for some field
 <
-- Files declared as `@meta` are only used for typing and documentation (similar to "*.d.ts" typescript files).
+- Files declared as `@meta` are only used for typing and documentation
+  (similar to "*.d.ts" typescript files).
 
 Example: the help for |vim.paste()| is generated from a docstring decorating
-vim.paste in runtime/lua/vim/_editor.lua like this: >
+vim.paste in runtime/lua/vim/_core/editor.lua like this: >
 
     --- Paste handler, invoked by |nvim_paste()| when a conforming UI
     --- (such as the |TUI|) pastes text into the editor.
@@ -300,10 +303,26 @@ vim.paste in runtime/lua/vim/_editor.lua like this: >
     --- @returns false if client should cancel the paste.
 
 
-STDLIB DESIGN GUIDELINES                                             *dev-lua*
+EXX ERROR CODES                                              *dev-error-codes*
 
-See also |dev-naming|.
+To choose a new "EXX" error code (e.g. |E5555|), just print a message with
+a new EXX number: >
+    emsg(_("E996: Invalid thing"));
+<
+To see existing error codes: >vim
+    :exe 'help' | let g:errtags=sort(map(taglist('E\d\d\d\?\d\?'), 'v:val.name'), 'N') | new | put =g:errtags
 
+The `linterrcodes` build target checks that all "EXX" codes are unique and
+have help tags. It runs in CI, but you can also run it locally: >
+    make linterrcodes
+<
+
+------------------------------------------------------------------------------
+Stdlib                                                               *dev-lua*
+
+GUIDANCE
+
+- Lua names generally should conform to |dev-naming|.
 - Keep the core Lua modules |lua-stdlib| simple. Avoid elaborate OOP or
   pseudo-OOP designs. Plugin authors just want functions to call, not a big,
   fancy inheritance hierarchy.
@@ -322,7 +341,8 @@ See also |dev-naming|.
   - Mimic the pairs() or ipairs() interface if the function is intended for
     use in a |for-in| loop.
 
-                                                          *dev-error-patterns*
+ERRORS                                                    *dev-error-patterns*
+
 To communicate failure to a consumer, choose from these patterns (in order of
 preference):
 1. `retval, errmsg`
@@ -340,13 +360,41 @@ preference):
 4. `on_error` callback
   - For async and "visitors" traversing a graph, where many errors may be
     collected while work continues.
-5. `vim.notify` (sometimes with optional `opts.silent` (async, visitors ^))
+5. `nvim_echo` (consider `opts.silent` for async/visitors)
   - High-level / application-level messages. End-user invokes these directly.
 
-                                                        *dev-patterns*
-Interface conventions ~
 
-Where possible, these patterns apply to _both_ Lua and the API:
+------------------------------------------------------------------------------
+API                                                                  *dev-api*
+
+Where applicable, this section applies to both Lua stdlib and RPC API.
+
+GUIDANCE
+
+- When adding an API, check the following:
+  - What precedents did you draw from? How does your solution compare to them?
+  - Does your new API allow future expansion? How? Or why not?
+  - Is the new API similar to existing APIs? Do we need to deprecate the old ones?
+  - Did you cross-reference related concepts in the docs?
+- Avoid "mutually exclusive" parameters (via constraints or limitations, if
+  necessary). For example nvim_create_autocmd() has mutually exclusive
+  "callback" and "command" args; but the "command" arg could be eliminated by
+  simply not supporting Vimscript function names, and treating a string
+  "callback" arg as an Ex command (which can call Vimscript functions). The
+  "buffer" arg could also be eliminated by treating a number "pattern" as
+  a buffer number.
+- Avoid functions that depend on cursor position, current buffer, etc. Instead
+  the function should take a position parameter, buffer parameter, etc.
+
+WHERE THINGS GO
+
+- API (libnvim/RPC): exposes low-level internals, or fundamental things (such
+  as `nvim_exec_lua()`) needed by clients or C consumers.
+- Lua stdlib = high-level functionality that builds on top of the API.
+
+See also |dev-layout|.
+
+API PATTERNS                                                *dev-api-patterns*
 
 - When accepting a buffer id, etc., 0 means "current buffer", nil means "all
   buffers".  Likewise for window id, tabpage id, etc.
@@ -360,13 +408,21 @@ Where possible, these patterns apply to _both_ Lua and the API:
     `function(<args>, cb(<ret)>))` => `function(<args>) -> <ret>`.
   - Example: >lua
     -- ✅ OK:
-    filter(…, opts, function() … end)
+    filter(…, opts, fn)
     -- ❌ NO:
-    filter(function() … end, …, opts)
-    -- ❌ NO:
-    filter(…, function() … end, opts)
+    filter(…, fn, opts)
+- If the module or topic wants to support configuration:
+  - Prefer a new 'option' (or family of related options, or "xxoptions" style
+    such as 'jumpoptions'). Options get these benefits "for free":
+    - Completion: `:set a<tab>`, `:lua vim.o.a<tab>`
+    - |OptionSet| event
+    - Scopes: global/buf/win/tab (can start as global, then "graduate" later)
+    - UI: `:verbose set`, `:options`, etc.
+  - Alternatively if the editor |options| system absolutey doesn't fit: Expose
+    a `config(opts)` interface (example: |vim.diagnostic.config()|). If `opts`
+    is omitted (or `nil`) it returns the current configuration.
 - "Enable" ("toggle") interface and behavior:
-  - `enable(…, nil)` and `enable(…, {buf=nil})` are synonyms and control the
+  - `enable(…, nil)` and `enable(…, {buf=nil})` are synonyms and control
     the "global" enablement of a feature.
     - `is_enabled(nil)` and `is_enabled({buf=nil})`, likewise, query the
       global state of the feature.
@@ -380,33 +436,15 @@ Where possible, these patterns apply to _both_ Lua and the API:
   appropriate): when the function returns a nil value it excludes (filters
   out) its input, else the transformed value is used.
   - Example: See the format() field of |vim.diagnostic.Opts.Float|.
+- Do not add "foreach" functions (e.g. |LanguageTree:for_each_tree()|).
+  Instead return an |iterable|, which is more flexible and composable: >
+    vim.iter(parser.tree_iter()):each(function()
+      ...
+    end)
+<
 
-API DESIGN GUIDELINES                                   *dev-api*
-
-See also |dev-naming|.
-
-- When adding an API, check the following:
-  - What precedents did you draw from? How does your solution compare to them?
-  - Does your new API allow future expansion? How? Or why not?
-  - Is the new API similar to existing APIs? Do we need to deprecate the old ones?
-  - Did you cross-reference related concepts in the docs?
-- Avoid "mutually exclusive" parameters--via constraints or limitations, if
-  necessary. For example nvim_create_autocmd() has mutually exclusive
-  "callback" and "command" args; but the "command" arg could be eliminated by
-  simply not supporting Vimscript function names, and treating a string
-  "callback" arg as an Ex command (which can call Vimscript functions). The
-  "buffer" arg could also be eliminated by treating a number "pattern" as
-  a buffer number.
-- Avoid functions that depend on cursor position, current buffer, etc. Instead
-  the function should take a position parameter, buffer parameter, etc.
-
-Where things go ~
-
-- API (libnvim/RPC): exposes low-level internals, or fundamental things (such
-  as `nvim_exec_lua()`) needed by clients or C consumers.
-- Lua stdlib = high-level functionality that builds on top of the API.
-
-NAMING GUIDELINES                                       *dev-naming*
+------------------------------------------------------------------------------
+NAMING                                                            *dev-naming*
 
 Naming is exceedingly important: the name of a thing is the primary interface
 for uses it, discusses it, searches for it, shares it... Consistent
@@ -415,8 +453,6 @@ intuitively understand related concepts ("families"), and reduces cognitive
 burden. Discoverability encourages code re-use and likewise avoids redundant,
 overlapping mechanisms, which reduces code surface-area, and thereby minimizes
 bugs...
-
-Naming conventions ~
 
 In general, look for precedent when choosing a name, that is, look at existing
 (non-deprecated) functions. In particular, see below...
@@ -433,6 +469,7 @@ Use existing common {verb} names (actions) if possible:
                     user-initiated and without error. (Compare "abort", which
                     cancels and signals error/failure.)
     - clear:        Clears state but does not destroy the container
+    - close:        Releases/destroys a resource.
     - create:       Creates a new (non-trivial) thing (TODO: rename to "def"?)
     - del:          Deletes a thing (or group of things)
     - detach:       Dispose attached listener (TODO: rename to "un"?)
@@ -461,6 +498,7 @@ Use existing common {verb} names (actions) if possible:
 
 Do NOT use these deprecated verbs:
     - contains:     Prefer "has".
+    - destroy:      Prefer "close".
     - disable:      Prefer `enable(enable: boolean)`.
     - exit:         Prefer "cancel" (or "stop" if appropriate).
     - is_disabled:  Prefer `!is_enabled()`.
@@ -488,6 +526,23 @@ Do NOT use these deprecated nouns:
     - command       Use "cmd" instead
     - window        Use "win" instead
 
+                                                        *continuation*
+A "continuation" is implemented as a callback function that returns the result
+of an async function and is called exactly once. Often accepts `err` as the
+first parameter, to avoid erroring on the main thread. Example: >
+    foo(…, callback: fun(err, …))
+Use the name `callback` only for a continuation. All other callbacks and event
+handlers should be named with the `on_…` convention. |dev-name-events|
+
+                                                        *dev-namespace-name*
+Use namespace names like `nvim.foo.bar`: >
+    vim.api.nvim_create_namespace('nvim.lsp.codelens')
+<
+
+                                                        *dev-augroup-name*
+Use autocommand group names like `nvim.foo.bar`: >
+    vim.api.nvim_create_augroup('nvim.treesitter.dev')
+<
                                                         *dev-name-events*
 Use the "on_" prefix to name event-handling callbacks and also the interface for
 "registering" such handlers (on_key). The dual nature is acceptable to avoid
@@ -496,21 +551,12 @@ a confused collection of naming conventions for these related concepts.
 Editor |events| (autocommands) are historically named like: >
     {Noun}{Event}
 
-Use this format to name API (RPC) events: >
-    nvim_{noun}_{event-name}_event
-
-Example: >
-    nvim_buf_changedtick_event
+RPC API events use this format: >
+    nvim_{noun}_{event}_event (example: nvim_buf_changedtick_event)
 <
-                                                        *continuation*
-A "continuation" is implemented as a callback function that returns the result
-of an async function and is called exactly once. Often accepts `err` as the
-first parameter, to avoid erroring on the main thread. Example: >
-    foo(…, callback: fun(err, …))
-Use the name `callback` only for a continuation. All other callbacks and event
-handlers should be named with the |dev-name-events| "on_…" convention.
 
-                                                        *dev-api-name*
+RPC API NAMING                                          *dev-api-name*
+
 Use this format to name new RPC |API| functions: >
     nvim_{topic}_{verb}_{arbitrary-qualifiers}
 
@@ -529,19 +575,8 @@ be a parameter (typically manifest as mutually-exclusive buf/win/… flags like
 - Example: `nvim_buf_del_mark` acts on a `Buffer` object (the first parameter)
   and uses the "del" {verb}.
 
-                                                        *dev-namespace-name*
-Use namespace names like `nvim.foo.bar`: >
-    vim.api.nvim_create_namespace('nvim.lsp.codelens')
-<
-
-                                                        *dev-augroup-name*
-Use autocommand group names like `nvim.foo.bar`: >
-    vim.api.nvim_create_augroup('nvim.treesitter.dev')
-<
-
-INTERFACE PATTERNS                                      *dev-api-patterns*
-
-Prefer adding a single `nvim_{topic}_{verb}_…` interface for a given topic.
+The RPC API doesn't have "modules" so its functions are grouped by a naming
+convention. Prefer the `nvim_{topic}_{verb}_…` convention where possible.
 
 Example: >
 
@@ -591,7 +626,36 @@ recommended (compare these 12(!) functions to the above 3 functions): >
     nvim_win_get_ns(…)
     nvim_tabpage_get_ns(…)
 
-API-CLIENT                                              *dev-api-client*
+
+------------------------------------------------------------------------------
+Interface patterns                                    *dev-interface-patterns*
+
+EX COMMANDS                                                        *dev-excmd*
+
+Prefer "flat" Ex commands (`:foobar`) instead of "subcommands" (`:foo bar`).
+except when the benefits below outweigh the costs.
+
+Pros of subcommands:
+- Useful when subcommands are discovered _at runtime_ (e.g. `:checkhealth foo`).
+  Plugins can extend the dispatcher by injecting subcommands.
+- `:Foo<tab>` completes only the `Foo` subcommands, whereas completing
+  a flat name matches every command sharing the prefix (e.g. `:FooBar` and
+  `:FootballBar`).
+- Completion can vary dynamically: e.g. `:lsp <tab>` can hide `stop` if no
+  client is running. (But this can be an antifeature, because it makes the
+  behavior less predictable.)
+
+Cons of subcommands:
+- Less harmonious with fuzzy pickers. Pickers can easily list `:foobar`,
+  whereas enumerating subcommands requires special logic. And in a picker,
+  `:foo bar` is often two "steps".
+- Adds a step when tab-completing.
+- Awkward to support `[!]`, ranges, `[count]`, etc., per-subcommand.
+- Implementation cost: a dispatcher with custom completion.
+
+
+------------------------------------------------------------------------------
+API client                                                    *dev-api-client*
 
                                                         *api-client*
 API clients wrap the Nvim |API| to provide idiomatic "SDKs" for their
@@ -606,7 +670,7 @@ These clients can be considered the "reference implementation" for API clients:
 - https://github.com/neovim/node-client
 - https://github.com/neovim/pynvim
 
-Standard Features ~
+STANDARD FEATURES
 
 - API clients exist to hide msgpack-rpc details. The wrappers can be
   automatically generated by reading the |api-metadata| from Nvim. |api-mapping|
@@ -616,7 +680,7 @@ Standard Features ~
 - Clients should handle |nvim_error_event| notifications, which will be sent
   if an async request to nvim was rejected or caused an error.
 
-Package Naming ~
+PACKAGE NAMING
 
 API client packages should NOT be named something ambiguous like "neovim" or
 "python-client".  Use "nvim" as a prefix/suffix to some other identifier
@@ -632,7 +696,7 @@ Examples of API-client package names:
 - ❌ NO: python-client
 - ❌ NO: neovim_
 
-API client implementation guidelines ~
+API CLIENT IMPLEMENTATION
 
 - Separate the transport layer from the rest of the library. |rpc-connecting|
 - Use a MessagePack library that implements at least version 5 of the
@@ -655,14 +719,15 @@ API client implementation guidelines ~
     https://github.com/msgpack-rpc/msgpack-rpc
 
 
-EXTERNAL UI                                             *dev-ui*
+------------------------------------------------------------------------------
+External UI                                                           *dev-ui*
 
 External UIs should be aware of the |api-contract|. In particular, future
 versions of Nvim may add new items to existing events. The API is strongly
 backwards-compatible, but clients must not break if new (optional) fields are
 added to existing events.
 
-Standard Features ~
+STANDARD FEATURES
 
 External UIs are expected to implement these common features:
 
@@ -686,8 +751,9 @@ External UIs are expected to implement these common features:
 - Handle the "restart" UI event so that |:restart| works.
 - Detect capslock and show an indicator if capslock is active.
 
-Multigrid UI ~
-                                                        *dev-ui-multigrid*
+
+MULTIGRID UI                                                *dev-ui-multigrid*
+
 - A multigrid UI should display floating windows using one of the following
   methods, using the `win_float_pos` |ui-multigrid| event. Different methods
   can be selected for each window as needed.

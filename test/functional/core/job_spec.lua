@@ -3,10 +3,11 @@ local n = require('test.functional.testnvim')()
 local Screen = require('test.functional.ui.screen')
 local tt = require('test.functional.testterm')
 
+local describe, it, before_each, pending, finally =
+  t.describe, t.it, t.before_each, t.pending, t.finally
 local clear = n.clear
 local eq = t.eq
 local eval = n.eval
-local exc_exec = n.exc_exec
 local feed_command = n.feed_command
 local feed = n.feed
 local insert = n.insert
@@ -48,12 +49,16 @@ describe('jobs', function()
     function! Normalize(data) abort
       " Windows: remove ^M and term escape sequences
       return type([]) == type(a:data)
-        \ ? map(a:data, 'substitute(substitute(v:val, "\r", "", "g"), "\x1b\\%(\\]\\d\\+;.\\{-}\x07\\|\\[.\\{-}[\x40-\x7E]\\)", "", "g")')
+        \ ? mapnew(a:data, 'substitute(substitute(v:val, "\r", "", "g"), "\x1b\\%(\\]\\d\\+;.\\{-}\x07\\|\\[.\\{-}[\x40-\x7E]\\)", "", "g")')
         \ : a:data
     endfunction
     function! OnEvent(id, data, event) dict
       let userdata = get(self, 'user')
       let data     = Normalize(a:data)
+      " If Normalize() made non-empty data empty, doesn't send a notification.
+      if type([]) == type(data) && len(data) == 1 && !empty(a:data[0]) && empty(data[0])
+        return
+      endif
       call rpcnotify(g:channel, a:event, userdata, data)
     endfunction
     let g:job_opts = {
@@ -105,7 +110,7 @@ describe('jobs', function()
           vim.v.progpath,
           '--clean',
           '--headless',
-          '+lua print(vim.uv.new_tty(1, false):get_winsize())',
+          '+lua tty = vim.uv.new_tty(1, false) print(tty:get_winsize()) tty:close()',
         }, {
           term = true,
           width = 11,
@@ -246,9 +251,12 @@ describe('jobs', function()
     eq({ 'notification', 'exit', { 0, 0 } }, next_msg())
   end)
 
-  it('changes to given `cwd` directory', function()
+  local function test_job_cwd()
     local dir = eval('resolve(tempname())'):gsub('/', get_pathsep())
     mkdir(dir)
+    finally(function()
+      rmdir(dir)
+    end)
     command("let g:job_opts.cwd = '" .. dir .. "'")
     if is_os('win') then
       command("let j = jobstart('cd', g:job_opts)")
@@ -269,7 +277,15 @@ describe('jobs', function()
         { 'notification', 'exit', { 0, 0 } },
       }
     )
-    rmdir(dir)
+  end
+
+  it('changes to given `cwd` directory', function()
+    test_job_cwd()
+  end)
+
+  it('changes to given `cwd` directory with pty', function()
+    command('let g:job_opts.pty = v:true')
+    test_job_cwd()
   end)
 
   it('fails to change to invalid `cwd`', function()
@@ -286,16 +302,42 @@ describe('jobs', function()
   end)
 
   it('error on non-executable `cwd`', function()
-    skip(is_os('win'), 'Not applicable for Windows')
+    skip(is_os('win'), 'N/A for Windows')
 
     local dir = 'Xtest_not_executable_dir'
     mkdir(dir)
+    finally(function()
+      rmdir(dir)
+    end)
     fn.setfperm(dir, 'rw-------')
+
     matches(
       '^Vim%(call%):E903: Process failed to start: permission denied: .*',
-      pcall_err(command, "call jobstart(['pwd'], {'cwd': '" .. dir .. "'})")
+      pcall_err(command, ("call jobstart(['pwd'], {'cwd': '%s'})"):format(dir))
     )
-    rmdir(dir)
+  end)
+
+  it('error log and exit status 122 on non-executable `cwd`', function()
+    skip(is_os('win'), 'N/A for Windows')
+
+    local logfile = 'Xchdir_fail_log'
+    clear({ env = { NVIM_LOG_FILE = logfile } })
+
+    local dir = 'Xtest_not_executable_dir'
+    mkdir(dir)
+    finally(function()
+      rmdir(dir)
+      n.check_close()
+      os.remove(logfile)
+    end)
+    fn.setfperm(dir, 'rw-------')
+
+    n.exec(([[
+      let s:chan = jobstart(['pwd'], {'cwd': '%s', 'pty': v:true})
+      let g:status = jobwait([s:chan], 1000)[0]
+    ]]):format(dir))
+    eq(122, eval('g:status'))
+    t.assert_log(('chdir%%(%s%%) failed: permission denied'):format(dir), logfile, 100)
   end)
 
   it('returns 0 when it fails to start', function()
@@ -548,9 +590,6 @@ describe('jobs', function()
 
   it('can redefine callbacks being used by a job', function()
     local screen = Screen.new()
-    screen:set_default_attr_ids({
-      [1] = { bold = true, foreground = Screen.colors.Blue },
-    })
     source([[
       function! g:JobHandler(job_id, data, event)
       endfunction
@@ -573,11 +612,6 @@ describe('jobs', function()
 
   it('requires funcrefs for script-local (s:) functions', function()
     local screen = Screen.new(60, 5)
-    screen:set_default_attr_ids({
-      [1] = { bold = true, foreground = Screen.colors.Blue1 },
-      [2] = { foreground = Screen.colors.Grey100, background = Screen.colors.Red },
-      [3] = { bold = true, foreground = Screen.colors.SeaGreen4 },
-    })
 
     -- Pass job callback names _without_ `function(...)`.
     source([[
@@ -591,7 +625,7 @@ describe('jobs', function()
         \ })
     ]])
 
-    screen:expect { any = '{2:E120: Using <SID> not in a script context: s:OnEvent}' }
+    screen:expect { any = '{9:E120: Using <SID> not in a script context: s:OnEvent}' }
   end)
 
   it('does not repeat output with slow output handlers', function()
@@ -682,7 +716,7 @@ describe('jobs', function()
     source([[
     function PrintArgs(a1, a2, id, data, event)
       " Windows: remove ^M
-      let normalized = map(a:data, 'substitute(v:val, "\r", "", "g")')
+      let normalized = mapnew(a:data, 'substitute(v:val, "\r", "", "g")')
       call rpcnotify(g:channel, '1', a:a1,  a:a2, normalized, a:event)
     endfunction
     let Callback = function('PrintArgs', ["foo", "bar"])
@@ -732,6 +766,50 @@ describe('jobs', function()
         { 'notification', '1', { 'foo', 'bar', { '', '' }, 'stdout' } },
       }
     )
+  end)
+
+  it('lists passed to callbacks are freed if not stored #25891', function()
+    if not exec_lua('return pcall(require, "ffi")') then
+      pending('N/A: missing LuaJIT FFI')
+    end
+
+    source([[
+      let g:stdout = ''
+      func AppendStrOnEvent(id, data, event)
+        let g:stdout ..= join(a:data, "\n")
+      endfunc
+      let g:job_opts = {'on_stdout': function('AppendStrOnEvent')}
+    ]])
+    local job = eval([[jobstart(['cat', '-'], g:job_opts)]])
+
+    exec_lua(function()
+      local ffi = require('ffi')
+      ffi.cdef([[
+        typedef struct listvar_S list_T;
+        list_T *gc_first_list;
+        list_T *tv_list_alloc(ptrdiff_t len);
+        void tv_list_free(list_T *const l);
+      ]])
+      _G.L = ffi.C.tv_list_alloc(1)
+      _G.L_val = ffi.cast('uintptr_t', _G.L)
+      assert(ffi.cast('uintptr_t', ffi.C.gc_first_list) == _G.L_val)
+    end)
+
+    local str_all = ''
+    for _, str in ipairs({ 'LINE1\nLINE2\nLINE3\n', 'LINE4\n', 'LINE5\nLINE6\n' }) do
+      str_all = str_all .. str
+      api.nvim_chan_send(job, str)
+      retry(nil, 1000, function()
+        eq(str_all, api.nvim_get_var('stdout'))
+      end)
+    end
+
+    exec_lua(function()
+      local ffi = require('ffi')
+      assert(ffi.cast('uintptr_t', ffi.C.gc_first_list) == _G.L_val)
+      ffi.C.tv_list_free(_G.L)
+      assert(ffi.cast('uintptr_t', ffi.C.gc_first_list) ~= _G.L_val)
+    end)
   end)
 
   it('jobstart() environment: $NVIM, $NVIM_LISTEN_ADDRESS #11009', function()
@@ -1171,9 +1249,6 @@ describe('jobs', function()
   end)
 
   describe('running tty-test program', function()
-    if skip(is_os('win')) then
-      return
-    end
     local function next_chunk()
       local rv
       while true do
@@ -1183,6 +1258,12 @@ describe('jobs', function()
           data[i] = data[i]:gsub('\n', '\000')
         end
         rv = table.concat(data, '\n')
+        if is_os('win') then
+          -- ConPTY injects its own terminal escapes (init/teardown CSI+OSC) and pads redraw rows
+          -- with trailing spaces around tty-test's plain output.
+          rv = rv:gsub('\27%[[%d;?]*[%a~]', ''):gsub('\27%][^\7]*\7', '')
+          rv = rv:gsub('[%s]+$', '')
+        end
         rv = rv:gsub('\r\n$', ''):gsub('^\r\n', '')
         if rv ~= '' then
           break
@@ -1219,12 +1300,14 @@ describe('jobs', function()
 
     it('resizing window', function()
       command('call jobresize(j, 40, 10)')
-      eq('rows: 10, cols: 40', next_chunk())
+      -- Windows: ConPTY emits a full screen redraw, so prior content ("tty ready") may prefix the new line.
+      matches('rows: 10, cols: 40$', next_chunk())
       command('call jobresize(j, 10, 40)')
-      eq('rows: 40, cols: 10', next_chunk())
+      matches('rows: 40, cols: 10$', next_chunk())
     end)
 
     it('jobclose() sends SIGHUP', function()
+      skip(is_os('win'), 'N/A: SIGHUP is a POSIX signal')
       command('call jobclose(j)')
       local msg = next_msg()
       msg = (msg[2] == 'stdout') and next_msg() or msg -- Skip stdout, if any.
@@ -1243,7 +1326,7 @@ describe('jobs', function()
       -- Can't wait for the next message in case this test fails, if it fails
       -- there won't be any more messages, and the test would hang.
       vim.uv.sleep(100)
-      local err = exc_exec('call jobpid(j)')
+      local err = pcall_err(command, 'call jobpid(j)')
       eq('Vim(call):E900: Invalid channel id', err)
 
       -- cleanup
@@ -1284,16 +1367,37 @@ describe('jobs', function()
     ]])
 
     feed(':q<CR>')
-    if is_os('freebsd') then
-      screen:expect { any = vim.pesc('[Process exited 0]') }
-    else
-      screen:expect([[
-                                                          |
-        [Process exited 0]^                                |
-                                                          |*4
-        {5:-- TERMINAL --}                                    |
-      ]])
+    screen:expect([[
+      ^                                                  |
+      [Process exited 0]                                |
+                                                        |*4
+      {5:-- TERMINAL --}                                    |
+    ]])
+  end)
+
+  it('uses real pipes for stdin/stdout #35984', function()
+    if is_os('win') then
+      return -- Not applicable for Windows.
     end
+
+    -- this fails on linux if we used socketpair() for stdin and stdout,
+    -- which libuv does if you ask to create stdio streams for you
+    local val = exec_lua(function()
+      local output
+      local job = vim.fn.jobstart('wc /dev/stdin > /dev/stdout', {
+        stdout_buffered = true,
+        on_stdout = function(_, data, _)
+          output = data
+        end,
+      })
+      vim.fn.chansend(job, 'foo\nbar baz\n')
+      vim.fn.chanclose(job, 'stdin')
+      vim.fn.jobwait({ job })
+      return output
+    end)
+    eq(2, #val, val)
+    eq({ '2', '3', '12', '/dev/stdin' }, vim.split(val[1], '%s+', { trimempty = true }))
+    eq('', val[2])
   end)
 end)
 

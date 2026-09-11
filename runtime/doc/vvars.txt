@@ -4,18 +4,34 @@
                 NVIM REFERENCE MANUAL
 
 
-Predefined variables                                             *vvars*
+Predefined variables					  *vvars* *v:var* *v:*
 
 Most variables are read-only, when a variable can be set by the user, it will
 be mentioned at the variable description below.  The type cannot be changed.
 
                                        Type |gO| to see the table of contents.
 
+						*v:argf* *argf-variable*
+v:argf
+		File arguments (expanded to absolute paths) given at startup.
+
+		Unlike |v:argv|, this does not include option arguments
+		such as `-u`, `--cmd`, or `+cmd`. Unlike |argv()|, it is not
+		affected by later |:args|, |:argadd|, or plugin modifications.
+
+		Example: >
+		  nvim file1.txt +ls -- file2.txt
+		  :echo v:argf
+		  " ['/path/to/cwd/file1.txt', '/path/to/cwd/file2.txt']
+<
+
 						*v:argv* *argv-variable*
 v:argv
-		The command line arguments Vim was invoked with.  This is a
-		list of strings.  The first item is the Vim command.
-		See |v:progpath| for the command with full path.
+		Command line arguments (`-u`, `--cmd`, `+cmd`, …) Nvim was
+		invoked with.  The first item is the Nvim command.
+
+		See |v:progpath| to get the full path to Nvim.
+		See |v:argf| to get only file args, without other options.
 
 						*v:char* *char-variable*
 v:char
@@ -111,14 +127,16 @@ v:dying
 				*v:echospace* *echospace-variable*
 v:echospace
 		Number of screen cells that can be used for an `:echo` message
-		in the last screen line before causing the |hit-enter-prompt|.
+		in the last screen line before causing the |hit-enter| prompt
+		(no longer applicable when |ui2| is enabled).
+
 		Depends on 'showcmd', 'ruler' and 'columns'.  You need to
 		check 'cmdheight' for whether there are full-width lines
 		available above the last line.
 
 					*v:errmsg* *errmsg-variable*
 v:errmsg
-		Last given error message.
+		Last error message that occurred (not necessarily displayed).
 		Modifiable (can be set).
 		Example: >vim
 		  let v:errmsg = ""
@@ -212,8 +230,24 @@ v:exiting
 		Exit code, or |v:null| before invoking the |VimLeavePre|
 		and |VimLeave| autocmds.  See |:q|, |:x| and |:cquit|.
 		Example: >vim
-		  :au VimLeave * echo "Exit value is " .. v:exiting
+		  :au VimLeave * echo "Exit code is " .. v:exiting
 <
+
+				*v:exitreason* *exitreason-variable*
+v:exitreason
+		Reason for the current exit. Set before |QuitPre|. Reset if
+		exit was canceled.
+
+		Possible values:
+		- ""          Not exiting, or exit was canceled.
+		- "quit"      |:quit|, |:qall|, |:wq|, |ZZ|, |ZQ|, etc.
+		- "restart"   |:restart|, |ZR|.
+		- "restart!"  |:restart!|, |[count]||ZR|.
+
+		Example: >vim
+		  autocmd ExitPre * if v:exitreason ==# 'restart' | echomsg 'restarting' | endif
+<
+		Read-only.
 
 					*v:false* *false-variable*
 v:false
@@ -249,12 +283,12 @@ v:fcs_reason
 		The reason why the |FileChangedShell| event was triggered.
 		Can be used in an autocommand to decide what to do and/or what
 		to set v:fcs_choice to.  Possible values:
-		  deleted   file no longer exists
-		  conflict  file contents, mode or timestamp was
+		- deleted   file no longer exists
+		- conflict  file contents, mode or timestamp was
 		            changed and buffer is modified
-		  changed   file contents has changed
-		  mode      mode of file changed
-		  time      only file timestamp changed
+		- changed   file contents has changed
+		- mode      mode of file changed
+		- time      only file timestamp changed
 
 					*v:fname* *fname-variable*
 v:fname
@@ -541,8 +575,6 @@ v:scrollstart
 		screen to scroll up.  It's only set when it is empty, thus the
 		first reason is remembered.  It is set to "Unknown" for a
 		typed command.
-		This can be used to find out why your script causes the
-		hit-enter prompt.
 
 			*v:searchforward* *searchforward-variable*
 v:searchforward
@@ -601,6 +633,25 @@ v:stacktrace
 		not finished.  Refer to |getstacktrace()| for the structure of
 		stack trace.  See also |v:exception|, |v:throwpoint|, and
 		|throw-variables|.
+
+				*v:startreason* *startreason-variable*
+v:startreason
+		The reason Nvim started. Possible values:
+		- "normal"    Normal startup, yearning for life, etc.
+		- "restart"   Started by |:restart|.
+		- "restart!"  Started by |:restart!|.
+
+		Read-only.
+
+				*v:starttime* *starttime-variable*
+v:starttime
+		Timestamp (nanoseconds since UNIX epoch) when the Nvim process
+		started.
+
+		To see the current "uptime": >lua
+		  vim.print(('uptime: %d seconds'):format(os.time() - (vim.v.starttime / 1e9)))
+<
+		Read-only.
 
 				*v:statusmsg* *statusmsg-variable*
 v:statusmsg
@@ -677,10 +728,10 @@ v:termrequest
 
 				*v:termresponse* *termresponse-variable*
 v:termresponse
-		The value of the most recent OSC or DCS control sequence
-		received by Nvim from the terminal. This can be read in a
-		|TermResponse| event handler after querying the terminal using
-		another escape sequence.
+		The most recent OSC, DCS, APC, or recognized CSI (DA1, kitty
+		multiple-cursors) control sequence received by Nvim from the
+		host-terminal. Can be read in a |TermResponse| event handler
+		after querying the terminal.
 
 					*v:testing* *testing-variable*
 v:testing	Must be set before using `test_garbagecollect_now()`.
@@ -713,6 +764,15 @@ v:true
 		operator) and to one when used as a Number (e.g. in |expr5| or
 		|expr7| when used with numeric operators).  Read-only.
 
+			*v:useractive* *useractive-variable* *user-idle*
+v:useractive
+		Timestamp (nanoseconds since UNIX epoch) indicating the most
+		recent user activity, i.e. when a key is received from a UI
+		(TUI input or |nvim_input()|).
+
+		Initialized to 0 (no user activity since startup).
+		Read-only.
+
 						*v:val* *val-variable*
 v:val
 		Value of the current item of a |List| or |Dictionary|.  Only
@@ -744,6 +804,14 @@ v:versionlong
 			*v:vim_did_enter* *vim_did_enter-variable*
 v:vim_did_enter
 		0 during startup, 1 just before |VimEnter|.
+		See also |v:vim_did_init|, which is set earlier.
+		Read-only.
+
+				*v:vim_did_init* *vim_did_init-variable*
+v:vim_did_init
+		0 during initialization, 1 after sourcing the user |vimrc|,
+		just before |load-plugins|.
+		See also |v:vim_did_enter|, which is set later.
 		Read-only.
 
 					*v:virtnum* *virtnum-variable*

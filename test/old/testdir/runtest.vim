@@ -150,6 +150,8 @@ lang mess C
 let &runtimepath ..= ',' .. expand($BUILD_DIR) .. '/runtime/'
 " Nvim: append libdir from build dir, which contains the bundled TS parsers.
 let &runtimepath ..= ',' .. expand($BUILD_DIR) .. '/lib/nvim/'
+" Nvim: load the ":helptags" module + parser now, because tests reset 'runtimepath'.
+lua pcall(vim.treesitter.language.add, 'vimdoc')
 
 let s:t_bold = &t_md
 let s:t_normal = &t_me
@@ -642,6 +644,8 @@ for g:testfunc in sort(s:tests)
 
   " A test can set g:test_is_flaky to retry running the test.
   let g:test_is_flaky = 0
+
+  let g:check_screendump_called = v:false
 
   " A test can set g:max_run_nr to change the max retry count.
   let g:max_run_nr = 5

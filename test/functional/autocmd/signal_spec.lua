@@ -1,6 +1,7 @@
 local t = require('test.testutil')
 local n = require('test.functional.testnvim')()
 
+local describe, it, before_each, finally = t.describe, t.it, t.before_each, t.finally
 local clear = n.clear
 local command = n.command
 local eq = t.eq
@@ -12,7 +13,7 @@ local read_file = t.read_file
 local feed = n.feed
 local retry = t.retry
 
-if skip(is_os('win'), 'Only applies to POSIX systems') then
+if skip(is_os('win'), 'N/A: Only applies to POSIX systems') then
   return
 end
 
@@ -65,6 +66,9 @@ describe("'autowriteall' on signal exit", function()
   end)
   it('dont write if SIGQUIT & awa off', function()
     test_deadly_sig('sigquit', false, false)
+  end)
+  it('dont write if SIGINT & awa on', function()
+    test_deadly_sig('sigint', true, false)
   end)
 end)
 

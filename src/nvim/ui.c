@@ -220,7 +220,7 @@ void ui_refresh(void)
   // Reset 'cmdheight' for all tabpages when ext_messages toggles.
   if (had_message != ui_ext[kUIMessages]) {
     if (ui_refresh_cmdheight) {
-      set_option_value(kOptCmdheight, NUMBER_OPTVAL(had_message), 0);
+      set_option_value(kOptCmdheight, INTEGER_OBJ(had_message), 0);
       FOR_ALL_TABS(tp) {
         tp->tp_ch_used = had_message;
       }
@@ -327,7 +327,7 @@ void ui_busy_stop(void)
 /// val is one of the OptBoFlags values, e.g., kOptBoFlagOperator
 void vim_beep(unsigned val)
 {
-  called_vim_beep = true;
+  did_beep++;
 
   if (emsg_silent != 0 || in_assert_fails) {
     return;
@@ -371,9 +371,14 @@ void do_autocmd_uienter_all(void)
   }
 }
 
+bool ui_can_attach_more(void)
+{
+  return ui_count < MAX_UI_COUNT;
+}
+
 void ui_attach_impl(RemoteUI *ui, uint64_t chanid)
 {
-  if (ui_count == MAX_UI_COUNT) {
+  if (ui_count >= MAX_UI_COUNT) {
     abort();
   }
   if (!ui->ui_ext[kUIMultigrid] && !ui->ui_ext[kUIFloatDebug]
@@ -409,6 +414,9 @@ void ui_attach_impl(RemoteUI *ui, uint64_t chanid)
 
 void ui_detach_impl(RemoteUI *ui, uint64_t chanid)
 {
+  if (ui_count > MAX_UI_COUNT) {
+    abort();
+  }
   size_t shift_index = MAX_UI_COUNT;
 
   // Find the index that will be removed
@@ -419,7 +427,7 @@ void ui_detach_impl(RemoteUI *ui, uint64_t chanid)
     }
   }
 
-  if (shift_index == MAX_UI_COUNT) {
+  if (shift_index >= MAX_UI_COUNT) {
     abort();
   }
 
@@ -538,8 +546,6 @@ void ui_flush(void)
 
   static bool was_busy = false;
 
-  cmdline_ui_flush();
-
   if (!(State & MODE_CMDLINE) && curwin->w_floating && curwin->w_config.hide) {
     if (!was_busy) {
       ui_call_busy_start();
@@ -551,7 +557,11 @@ void ui_flush(void)
   }
 
   win_ui_flush(false);
-  msg_ext_ui_flush();
+  // Avoid flushing callbacks expected to change text during textlock.
+  if (textlock == 0 && expr_map_lock == 0) {
+    cmdline_ui_flush();
+    msg_ext_ui_flush();
+  }
   msg_scroll_flush();
 
   if (pending_cursor_update) {
@@ -572,11 +582,18 @@ void ui_flush(void)
     arena_mem_free(arena_finish(&arena));
     pending_mode_info_update = false;
   }
-  if (pending_mode_update && !starting) {
-    char *full_name = shape_table[ui_mode_idx].full_name;
-    ui_call_mode_change(cstr_as_string(full_name), ui_mode_idx);
+
+  static bool cursor_was_obscured = false;
+  bool cursor_obscured = ui_cursor_is_behind_floatwin();
+  if ((cursor_obscured != cursor_was_obscured || pending_mode_update) && !starting) {
+    // Show "empty box" (underline style) cursor instead if behind a floatwin.
+    int idx = cursor_obscured ? SHAPE_IDX_R : ui_mode_idx;
+    char *full_name = shape_table[idx].full_name;
+    ui_call_mode_change(cstr_as_string(full_name), idx);
     pending_mode_update = false;
+    cursor_was_obscured = cursor_obscured;
   }
+
   if (pending_has_mouse != has_mouse) {
     (has_mouse ? ui_call_mouse_on : ui_call_mouse_off)();
     pending_has_mouse = has_mouse;
@@ -600,45 +617,57 @@ void ui_check_mouse(void)
     return;
   }
 
-  int checkfor = MOUSE_NORMAL;  // assume normal mode
-  if (VIsual_active) {
-    checkfor = MOUSE_VISUAL;
+  int checkfor = kMouseNormal;  // assume normal mode
+  if (Visual.active) {
+    checkfor = kMouseVisual;
   } else if (State == MODE_HITRETURN || State == MODE_ASKMORE || State == MODE_SETWSIZE) {
-    checkfor = MOUSE_RETURN;
+    checkfor = kMouseReturn;
   } else if (State & MODE_INSERT) {
-    checkfor = MOUSE_INSERT;
+    checkfor = kMouseInsert;
   } else if (State & MODE_CMDLINE) {
-    checkfor = MOUSE_COMMAND;
+    checkfor = kMouseCommand;
   } else if (State == MODE_EXTERNCMD) {
     checkfor = ' ';  // don't use mouse for ":!cmd"
   }
 
-  // mouse should be active if at least one of the following is true:
-  // - "c" is in 'mouse', or
-  // - 'a' is in 'mouse' and "c" is in MOUSE_A, or
-  // - the current buffer is a help file and 'h' is in 'mouse' and we are in a
-  //   normal editing mode (not at hit-return message).
+  if (ui_mouse_has(checkfor)) {
+    has_mouse = true;
+  }
+}
+
+// check if 'mouse' is active for the given mode
+//
+// mouse should be active if at least one of the following is true:
+// - "mode" is in 'mouse', or
+// - 'a' is in 'mouse' and "mode" is in MOUSE_A, or
+// - the current buffer is a help file and 'h' is in 'mouse' and we are in a
+//   normal editing mode (not at hit-return message).
+bool ui_mouse_has(int mode)
+{
   for (char *p = p_mouse; *p; p++) {
     switch (*p) {
     case 'a':
-      if (vim_strchr(MOUSE_A, checkfor) != NULL) {
-        has_mouse = true;
-        return;
+      if (vim_strchr(MOUSE_A, mode) != NULL) {
+        return true;
       }
+
       break;
-    case MOUSE_HELP:
-      if (checkfor != MOUSE_RETURN && curbuf->b_help) {
-        has_mouse = true;
-        return;
+    case kMouseHelp:
+      if (mode != kMouseReturn && curbuf->b_help) {
+        return true;
       }
+
       break;
     default:
-      if (checkfor == *p) {
-        has_mouse = true;
-        return;
+      if (mode == *p) {
+        return true;
       }
+
+      break;
     }
   }
+
+  return false;
 }
 
 /// Check if current mode has changed.
@@ -665,6 +694,25 @@ void ui_cursor_shape(void)
 {
   ui_cursor_shape_no_check_conceal();
   conceal_check_cursor_line();
+}
+
+/// Check if the cursor is behind a floating window (only in compositor mode).
+/// @return true if cursor is obscured by a float (when its zindex exceeds the
+/// zindex of the current window by 50).
+static bool ui_cursor_is_behind_floatwin(void)
+{
+  if ((State & MODE_CMDLINE) || !ui_comp_should_draw()) {
+    return false;
+  }
+
+  int crow = curwin->w_winrow + curwin->w_winrow_off + curwin->w_wrow;
+  int ccol = curwin->w_wincol + curwin->w_wincol_off
+             + (curwin->w_p_rl ? curwin->w_view_width - curwin->w_wcol - 1 : curwin->w_wcol);
+
+  ScreenGrid *top_grid = ui_comp_get_grid_at_coord(crow, ccol);
+  return top_grid != &curwin->w_grid_alloc
+         && top_grid != &default_grid
+         && top_grid->zindex >= curwin->w_grid_alloc.zindex + 50;
 }
 
 /// Returns true if the given UI extension is enabled.
@@ -739,15 +787,17 @@ static void ui_attach_error(uint32_t ns_id, const char *name, const char *msg)
   msg_schedule_semsg_multiline("Error in \"%s\" UI event handler (ns=%s):\n%s", name, ns, msg);
 }
 
-void ui_call_event(char *name, bool fast, Array args)
+void ui_call_event(char *name, Array args)
 {
-  bool handled = false;
-  UIEventCallback *event_cb;
-
-  // UI callbacks need to be allowed to change text.
+  // Don't impose textlock restrictions upon UI event handlers.
+  int save_expr_map_lock = expr_map_lock;
   int save_textlock = textlock;
+  expr_map_lock = 0;
   textlock = 0;
 
+  bool handled = false;
+  bool fast = msg_ext_fast && strcmp("msg_show", name) == 0;
+  UIEventCallback *event_cb;
   map_foreach(&ui_event_cbs, ui_event_ns_id, event_cb, {
     Error err = ERROR_INIT;
     uint32_t ns_id = ui_event_ns_id;
@@ -762,6 +812,7 @@ void ui_call_event(char *name, bool fast, Array args)
     }
     api_clear_error(&err);
   })
+  expr_map_lock = save_expr_map_lock;
   textlock = save_textlock;
 
   if (!handled) {

@@ -4,6 +4,7 @@ local t = require('test.testutil')
 local n = require('test.functional.testnvim')()
 local Screen = require('test.functional.ui.screen')
 
+local describe, it, before_each = t.describe, t.it, t.before_each
 local clear = n.clear
 local feed = n.feed
 local fn = n.fn
@@ -58,5 +59,12 @@ describe('Normal mode', function()
       {1:~                             }|*6
                                     |
     ]])
+  end)
+
+  it('"gk" does not crash with signcolumn=yes in narrow window #31274', function()
+    feed('o<Esc>')
+    command('1vsplit | setlocal signcolumn=yes')
+    feed('gk')
+    n.assert_alive()
   end)
 end)

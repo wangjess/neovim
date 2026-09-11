@@ -2,6 +2,8 @@ local t = require('test.testutil')
 local n = require('test.functional.testnvim')()
 local Screen = require('test.functional.ui.screen')
 
+local describe, it, before_each, after_each, finally =
+  t.describe, t.it, t.before_each, t.after_each, t.finally
 local api = n.api
 local clear = n.clear
 local command = n.command
@@ -37,6 +39,35 @@ describe('named marks', function()
     eq({ 3, 0 }, api.nvim_buf_get_mark(0, 'B'))
     command('4kc')
     eq({ 4, 0 }, api.nvim_buf_get_mark(0, 'c'))
+  end)
+
+  it('moved after a change follow their text through undo #5754', function()
+    command('edit ' .. file1)
+    command('1mark d')
+    command('$')
+    feed('dw')
+    command('2mark d')
+    eq({ 2, 0 }, api.nvim_buf_get_mark(0, 'd'))
+    command('undo')
+    eq({ 2, 0 }, api.nvim_buf_get_mark(0, 'd'))
+    command('redo')
+    eq({ 2, 0 }, api.nvim_buf_get_mark(0, 'd'))
+
+    -- A mark on a line the change deletes is cleared by the change; undo restores it.
+    api.nvim_buf_set_mark(0, 'e', 2, 2, {})
+    command('2delete')
+    eq({ 0, 2 }, api.nvim_buf_get_mark(0, 'e'))
+    command('undo')
+    eq({ 2, 2 }, api.nvim_buf_get_mark(0, 'e'))
+    eq('1test2', fn.getline(2))
+
+    -- A mark moved after a line-count change shifts with the text it was moved to.
+    command('2delete')
+    eq('1test3', fn.getline(2))
+    command('2mark f')
+    command('undo')
+    eq({ 3, 0 }, api.nvim_buf_get_mark(0, 'f'))
+    eq('1test3', fn.getline(3))
   end)
 
   it('errors when set out of range with :mark', function()
@@ -350,7 +381,7 @@ describe('named marks view', function()
   end)
 
   it('is restored in normal mode but not op-pending mode', function()
-    local screen = Screen.new(5, 8)
+    local screen = Screen.new(12, 8)
     command('edit ' .. file1)
     feed('<C-e>jWma')
     feed("G'a")
@@ -363,7 +394,7 @@ describe('named marks view', function()
       7 line      |
       8 line      |
                   |
-      ]]
+    ]]
     screen:expect({ grid = expected })
     feed('G`a')
     screen:expect([[
@@ -375,7 +406,7 @@ describe('named marks view', function()
       7 line      |
       8 line      |
                   |
-      ]])
+    ]])
     -- not in op-pending mode #20886
     feed('ggj=`a')
     screen:expect([[
@@ -387,35 +418,35 @@ describe('named marks view', function()
       6 line      |
       7 line      |
                   |
-      ]])
+    ]])
   end)
 
   it('is restored across files', function()
-    local screen = Screen.new(5, 5)
+    local screen = Screen.new(12, 5)
     command('args ' .. file1 .. ' ' .. file2)
     feed('<C-e>mA')
     local mark_view = [[
-    ^2 line      |
-    3 line      |
-    4 line      |
-    5 line      |
-                |
+      ^2 line      |
+      3 line      |
+      4 line      |
+      5 line      |
+                  |
     ]]
     screen:expect(mark_view)
     command('next')
     screen:expect([[
-    ^1 line      |
-    2 line      |
-    3 line      |
-    4 line      |
-                |
+      ^1 line      |
+      2 line      |
+      3 line      |
+      4 line      |
+                  |
     ]])
     feed("'A")
     screen:expect(mark_view)
   end)
 
   it("fallback to standard behavior when view can't be recovered", function()
-    local screen = Screen.new(10, 10)
+    local screen = Screen.new(12, 10)
     command('edit ' .. file1)
     feed('7GzbmaG') -- Seven lines from the top
     command('new') -- Screen size for window is now half the height can't be restored
@@ -429,11 +460,11 @@ describe('named marks view', function()
       8 line      |
       {3:<itor-marks }|
                   |
-      ]])
+    ]])
   end)
 
   it('fallback to standard behavior when mark is loaded from shada', function()
-    local screen = Screen.new(10, 6)
+    local screen = Screen.new(12, 6)
     command('edit ' .. file1)
     feed('G')
     feed('mA')

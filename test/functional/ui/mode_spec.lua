@@ -2,6 +2,7 @@ local t = require('test.testutil')
 local n = require('test.functional.testnvim')()
 local Screen = require('test.functional.ui.screen')
 
+local describe, it, before_each = t.describe, t.it, t.before_each
 local clear, feed, insert = n.clear, n.feed, n.insert
 local command = n.command
 local retry = t.retry
@@ -163,6 +164,11 @@ describe('ui mode_change event', function()
     local matchtime = 0
     command('set showmatch')
     retry(nil, nil, function()
+      if matchtime > 0 then
+        feed([[<c-\><c-n>]])
+        command("call setline(1, 'word')")
+      end
+
       matchtime = matchtime + 1
       local screen_timeout = 1000 * matchtime -- fail faster for retry.
 

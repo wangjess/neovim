@@ -34,7 +34,7 @@ int getviscol(void)
 {
   colnr_T x;
 
-  getvvcol(curwin, &curwin->w_cursor, &x, NULL, NULL);
+  getvvcol(curwin, &curwin->w_cursor, &x, NULL, NULL, 0);
   return (int)x;
 }
 
@@ -47,7 +47,7 @@ int getviscol2(colnr_T col, colnr_T coladd)
   pos.lnum = curwin->w_cursor.lnum;
   pos.col = col;
   pos.coladd = coladd;
-  getvvcol(curwin, &pos, &x, NULL, NULL);
+  getvvcol(curwin, &pos, &x, NULL, NULL, 0);
   return (int)x;
 }
 
@@ -101,7 +101,7 @@ static int coladvance2(win_T *wp, pos_T *pos, bool addspaces, bool finetune, col
   int one_more = (State & MODE_INSERT)
                  || (State & MODE_TERMINAL)
                  || restart_edit != NUL
-                 || (VIsual_active && *p_sel != 'o')
+                 || (Visual.active && *p_sel != 'o')
                  || ((get_ve_flags(wp) & kOptVeFlagOnemore) && wcol < MAXCOL);
 
   char *line = ml_get_buf(wp->w_buffer, pos->lnum);
@@ -111,7 +111,7 @@ static int coladvance2(win_T *wp, pos_T *pos, bool addspaces, bool finetune, col
     idx = linelen - 1 + one_more;
     col = wcol;
 
-    if ((addspaces || finetune) && !VIsual_active) {
+    if ((addspaces || finetune) && !Visual.active) {
       wp->w_curswant = linetabsize(wp, pos->lnum) + one_more;
       if (wp->w_curswant > 0) {
         wp->w_curswant--;
@@ -222,7 +222,7 @@ static int coladvance2(win_T *wp, pos_T *pos, bool addspaces, bool finetune, col
       if (!one_more) {
         colnr_T scol, ecol;
 
-        getvcol(wp, pos, &scol, NULL, &ecol);
+        getvcol(wp, pos, &scol, NULL, &ecol, 0);
         pos->coladd = ecol - scol;
       }
     } else {
@@ -260,9 +260,7 @@ int inc_cursor(void)
   return inc(&curwin->w_cursor);
 }
 
-/// Decrement the line pointer 'p' crossing line boundaries as necessary.
-///
-/// @return  1 when crossing a line, -1 when at start of file, 0 otherwise.
+/// Decrement the cursor position.  See dec() for return values.
 int dec_cursor(void)
 {
   return dec(&curwin->w_cursor);
@@ -308,7 +306,7 @@ void check_pos(buf_T *buf, pos_T *pos)
   }
 }
 
-/// Make sure curwin->w_cursor.lnum is valid.
+/// Make sure win->w_cursor.lnum is valid.
 void check_cursor_lnum(win_T *win)
 {
   buf_T *buf = win->w_buffer;
@@ -343,7 +341,7 @@ void check_cursor_col(win_T *win)
     // - 'virtualedit' is set
     if ((State & MODE_INSERT) || restart_edit
         || (State & MODE_TERMINAL)
-        || (VIsual_active && *p_sel != 'o')
+        || (Visual.active && *p_sel != 'o')
         || (cur_ve_flags & kOptVeFlagOnemore)
         || virtual_active(win)) {
       win->w_cursor.col = len;
@@ -372,7 +370,7 @@ void check_cursor_col(win_T *win)
         assert(win->w_cursor.coladd > 0);
         int cs, ce;
 
-        getvcol(win, &win->w_cursor, &cs, NULL, &ce);
+        getvcol(win, &win->w_cursor, &cs, NULL, &ce, 0);
         win->w_cursor.coladd = MIN(win->w_cursor.coladd, ce - cs);
       }
     } else {
@@ -389,20 +387,20 @@ void check_cursor(win_T *wp)
   check_cursor_col(wp);
 }
 
-/// Check if VIsual position is valid, correct it if not.
+/// Check if Visual.start position is valid, correct it if not.
 /// Can be called when in Visual mode and a change has been made.
 void check_visual_pos(void)
 {
-  if (VIsual.lnum > curbuf->b_ml.ml_line_count) {
-    VIsual.lnum = curbuf->b_ml.ml_line_count;
-    VIsual.col = 0;
-    VIsual.coladd = 0;
+  if (Visual.start.lnum > curbuf->b_ml.ml_line_count) {
+    Visual.start.lnum = curbuf->b_ml.ml_line_count;
+    Visual.start.col = 0;
+    Visual.start.coladd = 0;
   } else {
-    int len = ml_get_len(VIsual.lnum);
+    int len = ml_get_len(Visual.start.lnum);
 
-    if (VIsual.col > len) {
-      VIsual.col = len;
-      VIsual.coladd = 0;
+    if (Visual.start.col > len) {
+      Visual.start.col = len;
+      Visual.start.coladd = 0;
     }
   }
 }
@@ -412,7 +410,7 @@ void check_visual_pos(void)
 void adjust_cursor_col(void)
 {
   if (curwin->w_cursor.col > 0
-      && (!VIsual_active || *p_sel == 'o')
+      && (!Visual.active || *p_sel == 'o')
       && gchar_cursor() == NUL) {
     curwin->w_cursor.col--;
   }
@@ -439,7 +437,7 @@ bool set_leftcol(colnr_T leftcol)
   bool retval = false;
   // If the cursor is right or left of the screen, move it to last or first
   // visible character.
-  int siso = get_sidescrolloff_value(curwin);
+  int64_t siso = get_sidescrolloff_value(curwin);
   if (curwin->w_virtcol > (colnr_T)(lastcol - siso)) {
     retval = true;
     coladvance(curwin, (colnr_T)(lastcol - siso));
@@ -452,7 +450,7 @@ bool set_leftcol(colnr_T leftcol)
   // advance the cursor one more char.  If this fails (last char of the
   // line) adjust the scrolling.
   colnr_T s, e;
-  getvvcol(curwin, &curwin->w_cursor, &s, NULL, &e);
+  getvvcol(curwin, &curwin->w_cursor, &s, NULL, &e, 0);
   if (e > (colnr_T)lastcol) {
     retval = true;
     coladvance(curwin, s - 1);

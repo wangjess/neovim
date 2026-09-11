@@ -1,6 +1,7 @@
 local t = require('test.testutil')
 local n = require('test.functional.testnvim')()
 
+local describe, it, before_each = t.describe, t.it, t.before_each
 local clear = n.clear
 local eq = t.eq
 local eval = n.eval
@@ -25,6 +26,7 @@ describe('maparg()', function()
     silent = 0,
     rhs = 'bar',
     expr = 0,
+    replace_keycodes = 0,
     sid = 0,
     scriptversion = 1,
     buffer = 0,
@@ -157,6 +159,7 @@ describe('maparg()', function()
 
         buffer = 0,
         expr = 0,
+        replace_keycodes = 0,
         mode = 'n',
         mode_bits = 0x01,
         abbr = 0,

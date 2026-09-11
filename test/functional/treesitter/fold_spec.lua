@@ -2,6 +2,7 @@ local t = require('test.testutil')
 local n = require('test.functional.testnvim')()
 local Screen = require('test.functional.ui.screen')
 
+local describe, it, before_each = t.describe, t.it, t.before_each
 local clear = n.clear
 local eq = t.eq
 local insert = n.insert
@@ -687,12 +688,6 @@ t3]])
   end)
 
   it("doesn't open folds that are not touched", function()
-    -- test is known to be flaky
-    -- https://github.com/neovim/neovim/issues/33910
-    if t.skip_fragile(pending) then
-      return
-    end
-
     local screen = Screen.new(40, 8)
     screen:set_default_attr_ids({
       [1] = { foreground = Screen.colors.DarkBlue, background = Screen.colors.Gray },
@@ -713,37 +708,24 @@ t2]])
     )
 
     feed('ggzojo')
-    poke_eventloop()
-
-    screen:expect {
-      grid = [[
+    screen:expect([[
       {1:-}# h1                                   |
       {1:│}t1                                     |
       {1:-}^                                       |
       {1:+}{2:+--  2 lines: # h2·····················}|
       {3:~                                       }|*3
       {4:-- INSERT --}                            |
-    ]],
-    }
+    ]])
 
     -- TODO(tomtomjhj): `u` spuriously opens the fold (#26499).
-    feed('<Esc>uzMggzo')
-
-    feed('dd')
-    poke_eventloop()
-
-    if t.skip_fragile(pending, t.is_ci('cirrus')) then
-      return
-    end
-    screen:expect {
-      grid = [[
+    feed('<Esc>uzMggzodd')
+    screen:expect([[
       {1:-}^t1                                     |
       {1:-}# h2                                   |
       {1:│}t2                                     |
       {3:~                                       }|*4
       1 line less; before #2  {MATCH:.*}|
-    ]],
-    }
+    ]])
   end)
 
   it("doesn't call get_parser too often when parser is not available", function()
@@ -841,5 +823,43 @@ t2]])
       ^hello                                   |
                                               |
     ]])
+  end)
+
+  it('clamps unbounded changed ranges on 32-bit platforms', function()
+    insert([[
+one
+two]])
+
+    exec_lua(function()
+      local parser = {}
+
+      function parser:parse(_, callback)
+        if callback then
+          callback(nil, {})
+        end
+      end
+
+      function parser:for_each_tree() end
+
+      function parser:register_cbs(callbacks)
+        self.callbacks = callbacks
+      end
+
+      vim.treesitter.get_parser = function()
+        return parser
+      end
+
+      vim.treesitter.foldexpr()
+      vim.wo.foldmethod = 'expr'
+      vim._foldupdate = function(_, first, last)
+        _G.foldupdate_range = { first, last }
+      end
+
+      -- UINT32_MAX is represented as -1 by Lua integers on 32-bit platforms.
+      parser.callbacks.on_changedtree({ { 0, 0, -1, -1 } })
+    end)
+    poke_eventloop()
+
+    eq({ 0, 2 }, exec_lua('return _G.foldupdate_range'))
   end)
 end)

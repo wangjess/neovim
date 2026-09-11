@@ -1,12 +1,12 @@
 " Vim syntax file
 " Language: lf file manager configuration file (lfrc)
-" Maintainer: Andis Sprinkis <andis@sprinkis.com>
+" Maintainer: Andis Sprinkis <andis@sprinkis.com>, @CatsDeservePets
 " Former Maintainer: Cameron Wright
 " URL: https://github.com/andis-sprinkis/lf-vim
-" Last Change: 7 Sep 2025
+" Last Change: 31 Jul 2026
 "
 " The shell syntax highlighting is configurable. See $VIMRUNTIME/doc/syntax.txt
-" lf version: 38
+" lf version: 42
 
 if exists("b:current_syntax") | finish | endif
 
@@ -34,6 +34,7 @@ syn keyword lfOptions
   \ anchorfind
   \ autoquit
   \ borderfmt
+  \ borderstyle
   \ bottom
   \ calcdirsize
   \ cd
@@ -63,6 +64,7 @@ syn keyword lfOptions
   \ cmd-menu-accept
   \ cmd-menu-complete
   \ cmd-menu-complete-back
+  \ cmd-menu-discard
   \ cmd-right
   \ cmd-transpose
   \ cmd-transpose-word
@@ -129,10 +131,12 @@ syn keyword lfOptions
   \ menufmt
   \ menuheaderfmt
   \ menuselectfmt
+  \ mergeindicators
   \ middle
   \ mouse
   \ nmaps
   \ number
+  \ numbercursorfmt
   \ numberfmt
   \ on-cd
   \ on-focus-gained
@@ -148,6 +152,7 @@ syn keyword lfOptions
   \ paste
   \ period
   \ pre-cd
+  \ preload
   \ preserve
   \ preview
   \ previewer
@@ -161,7 +166,7 @@ syn keyword lfOptions
   \ reload
   \ rename
   \ reverse
-  \ roundbox
+  \ rulerfile
   \ rulerfmt
   \ scroll-down
   \ scroll-up
@@ -186,6 +191,8 @@ syn keyword lfOptions
   \ smartcase
   \ smartdia
   \ sortby
+  \ sortignorecase
+  \ sortignoredia
   \ source
   \ statfmt
   \ sync
@@ -194,6 +201,7 @@ syn keyword lfOptions
   \ tag-toggle
   \ tagfmt
   \ tempmarks
+  \ terminalcursor
   \ timefmt
   \ toggle
   \ top

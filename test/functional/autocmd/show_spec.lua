@@ -2,6 +2,7 @@ local t = require('test.testutil')
 local n = require('test.functional.testnvim')()
 local Screen = require('test.functional.ui.screen')
 
+local describe, it, before_each = t.describe, t.it, t.before_each
 local clear = n.clear
 local command = n.command
 local dedent = t.dedent
@@ -187,6 +188,18 @@ describe(':autocmd', function()
       test_3  User
           B         echo "B3"]]),
       fn.execute('autocmd test_3 * B')
+    )
+    eq(
+      dedent([[
+
+      --- Autocommands ---]]),
+      fn.execute('autocmd * ,')
+    )
+    eq(
+      dedent([[
+
+      --- Autocommands ---]]),
+      fn.execute('autocmd * ,,,')
     )
   end)
 

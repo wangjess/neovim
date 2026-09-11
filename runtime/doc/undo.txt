@@ -1,7 +1,7 @@
 *undo.txt*      Nvim
 
 
-		  VIM REFERENCE MANUAL    by Bram Moolenaar
+		  VIM REFERENCE MANUAL	  by Bram Moolenaar
 
 
 Undo and redo						*undo-redo*
@@ -14,7 +14,8 @@ The basics are explained in section |02.5| of the user manual.
 1. Undo and redo commands				*undo-commands*
 
 <Undo>		or					*undo* *<Undo>* *u*
-u			Undo [count] changes.
+u			Undo [count] changes. The cursor returns to its
+			original position.
 
 							*:u* *:un* *:undo*
 :u[ndo]			Undo one change.
@@ -133,7 +134,8 @@ option has been set to a different value.  For example: >
 Above we only discussed one line of undo/redo.  But it is also possible to
 branch off.  This happens when you undo a few changes and then make a new
 change.  The undone changes become a branch.  You can go to that branch with
-the following commands.
+the following commands.  The undo-tree of a file can be visualized and
+interactively applied using |:Undotree|.
 
 This is explained in the user manual: |usr_32.txt|.
 

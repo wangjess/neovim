@@ -2,6 +2,7 @@ local t = require('test.testutil')
 local n = require('test.functional.testnvim')()
 local Screen = require('test.functional.ui.screen')
 
+local describe, it, before_each = t.describe, t.it, t.before_each
 local clear = n.clear
 local command = n.command
 local exec = n.exec
@@ -393,7 +394,7 @@ describe('Conceal', function()
             \ "three |hidden| three three three three three three three three"]
       call setline(1, lines)
       set wrap linebreak
-      set showbreak=\ >>>\ 
+      let &showbreak = ' >>> '
       syntax match test /|hidden|/ conceal
       set conceallevel=2
       set concealcursor=

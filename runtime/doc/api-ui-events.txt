@@ -55,7 +55,7 @@ with these (optional) keys:
 - `ext_termcolors`	Use external default colors.
 - `term_name`		Sets the name of the terminal 'term'.
 - `term_colors`		Sets the number of supported colors 't_Co'.
-- `stdin_fd`		Read buffer 1 from this fd as if it were stdin |--|.
+- `stdin_fd`		Treat this fd as if it were stdin when using |--|.
 			Only from |--embed| UI on startup. |ui-startup-stdin|
 - `stdin_tty`		Tells if `stdin` is a `tty` or not.
 - `stdout_tty`		Tells if `stdout` is a `tty` or not.
@@ -135,18 +135,14 @@ procedure:
 
 1. Invoke |nvim_get_api_info()|, if needed to setup the client library and/or
    to get the list of supported UI extensions.
-
 2. Do any configuration that should be happen before user config is loaded.
    Buffers and windows are not available at this point, but this could be used
    to set |g:| variables visible to init.vim
-
 3. If the UI wants to do additional setup after user config is loaded,
    register a VimEnter autocmd: >lua
       nvim_command("autocmd VimEnter * call rpcrequest(1, 'vimenter')")
-
 4. Now invoke |nvim_ui_attach()|. The UI must handle user input by now:
    sourcing init.vim and loading buffers might lead to blocking prompts.
-
 5. If step 3 was used, Nvim will send a blocking "vimenter" request to the UI.
    Inside this request handler, the UI can safely do any initialization before
    entering normal mode, for example reading variables set by init.vim.
@@ -251,13 +247,20 @@ the editor.
 	Indicates to the UI that it must stop rendering the cursor. This event
 	is misnamed and does not actually have anything to do with busyness.
 
-["restart", progpath, argv] ~
-	|:restart| command has been used and the Nvim server is about to exit.
-	The UI should wait for the server to exit, and then start a new server
-	using `progpath` as the full path to the Nvim executable |v:progpath| and
-	`argv` as its arguments |v:argv|, and reattach to the new server.
-	Note: |--embed| and |--headless| are excluded from `argv`, and the client
-	should decide itself whether to add either flag.
+["connect", server_addr] ~
+	User invoked the |:connect| command. Nvim detached the current UI.
+
+	UI is expected to:
+	1. Attach to the server at `server_addr`.
+
+["restart", listen_addr] ~
+	User invoked the |:restart| command. Nvim started a new server. The
+	old server is about to exit and close its channel.
+
+	UI is expected to:
+	1. Wait for the channel to be closed, to confirm that the old server
+	   actually exited.
+	2. Attach to the new server at `listen_addr`.
 
 ["suspend"] ~
 	|:suspend| command or |CTRL-Z| mapping is used. A terminal client (or
@@ -339,6 +342,10 @@ numerical highlight ids to the actual attributes.
 	`underdotted`:		underdotted text. The dots have `special` color.
 	`underdashed`:		underdashed text. The dashes have `special` color.
 	`altfont`:		alternative font.
+	`dim`:			half-bright/faint text.
+	`blink`:		blinking text.
+	`conceal`:		concealed/hidden text.
+	`overline`:		overlined text.
 	`blend`:		blend level (0-100). Could be used by UIs to
 				support blending floating windows to the
 				background or to signal a transparent cursor.
@@ -508,6 +515,10 @@ is not active. New UIs should implement |ui-linegrid| instead.
 	`underdouble`:	double underlined text. The lines have `special` color.
 	`underdotted`:	underdotted text. The dots have `special` color.
 	`underdashed`:	underdashed text. The dashes have `special` color.
+	`dim`:		half-bright/faint text.
+	`blink`:	blinking text.
+	`conceal`:	concealed/hidden text.
+	`overline`:	overlined text.
 
 ["put", text] ~
 	The (utf-8 encoded) string `text` is put at the cursor position
@@ -756,27 +767,32 @@ This UI extension delegates presentation of the |cmdline| (except 'wildmenu').
 For command-line 'wildmenu' UI events, activate |ui-popupmenu|.
 
 ["cmdline_show", content, pos, firstc, prompt, indent, level, hl_id] ~
-        content: List of [attrs, string, hl_id]
-	         [[{}, "t", hl_id], [attrs, "est", hl_id], ...]
-
 	Triggered when the cmdline is displayed or changed.
-	The `content` is the full content that should be displayed in the
-	cmdline, and the `pos` is the position of the cursor that in the
-	cmdline. The content is divided into chunks with different highlight
-	attributes represented as a dict (see |ui-event-highlight_set|).
 
-	`firstc` and `prompt` are text, that if non-empty should be
-	displayed in front of the command line. `firstc` always indicates
-	built-in command lines such as `:` (ex command) and `/` `?` (search),
-	while `prompt` is an |input()| prompt, highlighted with `hl_id`.
-	`indent` tells how many spaces the content should be indented.
+	content
+	    Array of `[attr_id, text_chunk, hl_id]` tuples, building up the
+	    cmdline text of chunks with different highlights.
 
-	The Nvim command line can be invoked recursively, for instance by
-	typing `<c-r>=` at the command line prompt. The `level` field is used
-	to distinguish different command lines active at the same time. The
-	first invoked command line has level 1, the next recursively-invoked
-	prompt has level 2. A command line invoked from the |cmdline-window|
-	has a higher level than the edited command line.
+	pos
+	    Position of the cursor in the cmdline (byte offset).
+
+	firstc
+	    Character preceding the cmdline content (|getcmdtype()|).
+
+	prompt
+	    String preceding the cmdline content when an |input()| prompt is
+	    active, false otherwise. Highlighted with `hl_id`.
+
+	indent
+	    Number of spaces the content should be indented.
+
+	level
+	    Number indicating the cmdline recursion level. Incremented by
+	    e.g |c_CTRL-R_=|, prompts or a commandline invoked from the
+	    |cmdline-window|.
+
+	hl_id
+	    Highlight group ID of the prompt, -1 with no active prompt.
 
 ["cmdline_pos", pos, level] ~
 	Change the cursor position in the cmdline.
@@ -825,9 +841,9 @@ will be set to zero, but can be changed and used for the replacing cmdline or
 message window. Cmdline state is emitted as |ui-cmdline| events, which the UI
 must handle.
 
-["msg_show", kind, content, replace_last, history, append, msg_id] ~
+["msg_show", kind, content, replace_last, history, append, id, trigger] ~
 	Display a message to the user. Update (replace) any existing message
-	matching `msg_id`.
+	matching `id`.
 
 	kind
 	    Name indicating the message kind:
@@ -835,7 +851,6 @@ must handle.
 		"empty"		Empty message (`:echo ""`), with empty `content`.
 				Should clear messages sharing the 'cmdheight'
 				area if it is the only message in a batch.
-		"bufwrite"	|:write| message
 		"confirm"	Message preceding a prompt (|:confirm|,
 				|confirm()|, |inputlist()|, |z=|, …)
 		"emsg"		Error (|errors|, internal error, |:throw|, …)
@@ -846,9 +861,13 @@ must handle.
 		"list_cmd"	List output for various commands (|:ls|, |:set|, …)
 		"lua_error"	Error in |:lua| code
 		"lua_print"	|print()| from |:lua| code
-		"progress"	Progress message emitted by |nvim_echo()|
-		"rpc_error"	Error response from |rpcrequest()|
+		"progress"	Progress message emitted by |nvim_echo()|.
+				Internal progress messages use these ids:
+			          - `nvim.bufwrite "<filename>"`
+			          - `nvim.completion`
+			          - `nvim.indent`
 		"quickfix"	Quickfix navigation message
+		"rpc_error"	Error response from |rpcrequest()|
 		"search_cmd"	Entered search command
 		"search_count"	Search count message ("S" flag of 'shortmess')
 		"shell_cmd"	|:!cmd| executed command
@@ -864,7 +883,7 @@ must handle.
 
 	content
 	    Array of `[attr_id, text_chunk, hl_id]` tuples, building up the
-	    message text of chunks of different highlights. No extra spacing
+	    message text of chunks with different highlights. No extra spacing
 	    should be added between chunks, the `text_chunk` by itself
 	    contains any necessary whitespace. Messages can contain line
 	    breaks "\n".
@@ -883,9 +902,14 @@ must handle.
 	    True if the message should be appended to the previous message,
 	    rather than started on a new line. Is set for |:echon|.
 
-	msg_id
+	id
 	    Unique identifier for the message. It can either be an integer or
-	    string. When message of same id appears it should replace the older message.
+	    string. A (visible) message with the same id should be replaced.
+
+	trigger
+	    Type of action that triggered the message:
+		"" (empty)      Unknown (consider a |feature-request|)
+		"typed_cmd"     Interactively typed command on the |cmdline|
 
 ["msg_clear"] ~
 	Clear all messages currently displayed by "msg_show", emitted after

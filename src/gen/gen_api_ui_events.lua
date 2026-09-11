@@ -1,11 +1,12 @@
+---@diagnostic disable: no-unknown
 local mpack = vim.mpack
 
 assert(#arg == 5)
-local input = io.open(arg[1], 'rb')
-local call_output = io.open(arg[2], 'wb')
-local remote_output = io.open(arg[3], 'wb')
-local metadata_output = io.open(arg[4], 'wb')
-local client_output = io.open(arg[5], 'wb')
+local input = assert(io.open(arg[1], 'rb'))
+local call_output = assert(io.open(arg[2], 'wb'))
+local remote_output = assert(io.open(arg[3], 'wb'))
+local metadata_output = assert(io.open(arg[4], 'wb'))
+local client_output = assert(io.open(arg[5], 'wb'))
 
 local c_grammar = require('gen.c_grammar')
 local events = c_grammar.grammar:match(input:read('*all'))
@@ -105,7 +106,8 @@ for i = 1, #events do
   local ev = events[i]
   assert(ev.return_type == 'void')
 
-  if ev.since == nil and not ev.noexport then
+  -- Allow unstabilized events starting with "_". Compare "nvim__" for methods.
+  if ev.since == nil and not ev.noexport and not vim.startswith(ev.name, '_') then
     print('Ui event ' .. ev.name .. ' lacks since field.\n')
     os.exit(1)
   end
@@ -136,7 +138,7 @@ for i = 1, #events do
       call_output:write('  }\n')
       call_output:write('  entered = true;\n')
       write_arglist(call_output, ev)
-      call_output:write(('  ui_call_event("%s", %s, %s)'):format(ev.name, tostring(ev.fast), args))
+      call_output:write(('  ui_call_event("%s", %s)'):format(ev.name, args))
       call_output:write(';\n  entered = false;\n')
     elseif ev.compositor_impl then
       call_output:write('  ui_comp_' .. ev.name)
@@ -210,7 +212,7 @@ for _, ev in ipairs(events) do
       p[1] = 'Dictionary'
     end
   end
-  if not ev.noexport then
+  if not ev.noexport and not vim.startswith(ev.name, '_') then
     exported_events[#exported_events + 1] = ev_exported
   end
 end

@@ -100,6 +100,7 @@ CSType init_charsize_arg(CharsizeArg *csarg, win_T *wp, linenr_T lnum, char *lin
   csarg->cur_text_width_left = 0;
   csarg->cur_text_width_right = 0;
   csarg->virt_row = -1;
+  csarg->skip_cur_text = false;
   csarg->indent_width = INT_MIN;
   csarg->use_tabstop = !wp->w_p_list || wp->w_p_lcs_chars.tab1;
 
@@ -116,6 +117,44 @@ CSType init_charsize_arg(CharsizeArg *csarg, win_T *wp, linenr_T lnum, char *lin
   } else {
     return kCharsizeFast;
   }
+}
+
+/// Like init_charsize_arg(), but do not count inline virtual text at the measured character.
+/// The 'linebreak' lookahead can still use "virt_row", without initializing "iter".
+CSType init_charsize_arg_skip_cur_text(CharsizeArg *csarg, win_T *wp, linenr_T lnum, char *line)
+{
+  CSType cstype = init_charsize_arg(csarg, wp, 0, line);
+  csarg->skip_cur_text = true;
+  if (lnum > 0 && buf_meta_total(wp->w_buffer, kMTMetaInline) > 0) {
+    csarg->virt_row = lnum - 1;
+    cstype = kCharsizeRegular;
+  }
+  return cstype;
+}
+
+/// Total width of inline virtual text at buffer column "col" of row "row", advancing "iter".
+/// Call with non-decreasing "col", like the walks in charsize_regular().
+static int inline_virt_text_width(win_T *wp, MarkTreeIter *iter, int row, int col)
+{
+  buf_T *const buf = wp->w_buffer;
+  int width = 0;
+  while (true) {
+    MTKey mark = marktree_itr_current(iter);
+    if (mark.pos.row != row || mark.pos.col > col) {
+      break;
+    } else if (mark.pos.col == col && !mt_invalid(mark) && ns_in_win(mark.ns, wp)) {
+      DecorInline decor = mt_decor(mark);
+      DecorVirtText *vt = decor.ext ? decor.data.ext.vt : NULL;
+      while (vt) {
+        if (!(vt->flags & kVTIsLines) && vt->pos == kVPosInline) {
+          width += vt->width;
+        }
+        vt = vt->next;
+      }
+    }
+    marktree_itr_next_filter(buf->b_marktree, iter, row + 1, 0, inline_filter);
+  }
+  return width;
 }
 
 /// Get the number of cells taken up on the screen for the given arguments.
@@ -156,7 +195,7 @@ CharSize charsize_regular(CharsizeArg *csarg, char *const cur, colnr_T const vco
     is_doublewidth = size == 2 && cur_char >= 0x80;
   }
 
-  if (csarg->virt_row >= 0) {
+  if (csarg->virt_row >= 0 && !csarg->skip_cur_text) {
     int tab_size = size;
     int col = (int)(cur - line);
     while (true) {
@@ -269,7 +308,7 @@ CharSize charsize_regular(CharsizeArg *csarg, char *const cur, colnr_T const vco
 
         if (max_head_vcol == 0 || vcol + size + added < max_head_vcol) {
           head += cnt * head_mid;
-        } else if (max_head_vcol > vcol + head_prev + prev_rem) {
+        } else if (width2 > 0 && max_head_vcol > vcol + head_prev + prev_rem) {
           head += (max_head_vcol - (vcol + head_prev + prev_rem)
                    + width2 - 1) / width2 * head_mid;
         } else if (max_head_vcol < 0) {
@@ -288,6 +327,7 @@ CharSize charsize_regular(CharsizeArg *csarg, char *const cur, colnr_T const vco
     size += added;
   }
 
+  int size_before_lbr = size;
   bool need_lbr = false;
   // If 'linebreak' set check at a blank before a non-blank if the line
   // needs a break here.
@@ -315,6 +355,11 @@ CharSize charsize_regular(CharsizeArg *csarg, char *const cur, colnr_T const vco
       }
     }
 
+    // Inline virtual text widens the word, so count it like the loop above does for one
+    // character. Needs its own iterator, since this looks ahead of "csarg->iter".
+    MarkTreeIter virt_iter[1];
+    int has_virt = csarg->virt_row < 0 ? 0 : -1;  // -1: not sought yet
+
     colnr_T vcol2 = vcol;
     while (true) {
       char *ps = s;
@@ -325,6 +370,14 @@ CharSize charsize_regular(CharsizeArg *csarg, char *const cur, colnr_T const vco
         break;
       }
 
+      int const col = (int)(s - line);
+      if (has_virt < 0) {
+        has_virt = marktree_itr_get_filter(buf->b_marktree, csarg->virt_row, col,
+                                           csarg->virt_row + 1, 0, inline_filter, virt_iter);
+      }
+      int const virt_width = has_virt
+                             ? inline_virt_text_width(wp, virt_iter, csarg->virt_row, col) : 0;
+      vcol2 += virt_width;
       vcol2 += win_chartabsize(wp, s, vcol2);
       if (vcol2 >= colmax) {  // doesn't fit
         size = colmax - vcol + col_adj;
@@ -333,7 +386,9 @@ CharSize charsize_regular(CharsizeArg *csarg, char *const cur, colnr_T const vco
     }
   }
 
-  return (CharSize){ .width = size, .head = head };
+  int tail = size - size_before_lbr;
+
+  return (CharSize){ .width = size, .head = head, .tail = tail };
 }
 
 /// Like charsize_regular(), except it doesn't handle inline virtual text,
@@ -512,6 +567,10 @@ static int virt_text_cursor_off(const CharsizeArg *csarg, bool on_NUL)
 /// cursor: where the cursor is on this character (first char, except for TAB)
 ///    end: on the last position of this character (TAB, ctrl)
 ///
+/// When 'linebreak' follows this character, "end" is set to the position before
+/// 'linebreak' if "flags" contains GETVCOL_END_EXCL_LBR, otherwise it's set to
+/// the end of 'linebreak'.
+///
 /// This is used very often, keep it fast!
 ///
 /// @param wp
@@ -519,7 +578,8 @@ static int virt_text_cursor_off(const CharsizeArg *csarg, bool on_NUL)
 /// @param start
 /// @param cursor
 /// @param end
-void getvcol(win_T *wp, pos_T *pos, colnr_T *start, colnr_T *cursor, colnr_T *end)
+/// @param flags
+void getvcol(win_T *wp, pos_T *pos, colnr_T *start, colnr_T *cursor, colnr_T *end, int flags)
 {
   char *const line = ml_get_buf(wp->w_buffer, pos->lnum);  // start of the line
   colnr_T const end_col = pos->col;
@@ -551,9 +611,10 @@ void getvcol(win_T *wp, pos_T *pos, colnr_T *start, colnr_T *cursor, colnr_T *en
   } else {
     while (true) {
       char_size = charsize_regular(&csarg, ci.ptr, vcol, ci.chr.value);
+      // make sure we don't go past the end of the line
       if (*ci.ptr == NUL) {
-        // if cursor is at NUL, it is treated like 1 cell char unless there is virtual text
-        char_size.width = MAX(1, csarg.cur_text_width_left + csarg.cur_text_width_right);
+        // NUL at end of line only takes one column unless there is virtual text
+        char_size.width = 1 + csarg.cur_text_width_left + csarg.cur_text_width_right;
         on_NUL = true;
         break;
       }
@@ -570,29 +631,27 @@ void getvcol(win_T *wp, pos_T *pos, colnr_T *start, colnr_T *cursor, colnr_T *en
     pos->col = (colnr_T)(ci.ptr - line);
   }
 
-  int head = char_size.head;
   int incr = char_size.width;
+  int head = char_size.head;
+  int tail = char_size.tail;
 
   if (start != NULL) {
     *start = vcol + head;
   }
-
   if (end != NULL) {
-    *end = vcol + incr - 1;
+    *end = vcol + incr - (flags & GETVCOL_END_EXCL_LBR ? tail : 0) - 1;
   }
-
   if (cursor != NULL) {
     if (ci.chr.value == TAB
         && (State & MODE_NORMAL)
         && !wp->w_p_list
         && !virtual_active(wp)
-        && !(VIsual_active && ((*p_sel == 'e') || ltoreq(*pos, VIsual)))) {
-      // cursor at end
-      *cursor = vcol + incr - 1;
+        && !(Visual.active && ((*p_sel == 'e') || ltoreq(*pos, Visual.start)))) {
+      // TODO(zeertzjq): subtracting "tail" may lead to better cursor position
+      *cursor = vcol + incr - 1;  // cursor at end
     } else {
       vcol += virt_text_cursor_off(&csarg, on_NUL);
-      // cursor at start
-      *cursor = vcol + head;
+      *cursor = vcol + head;  // cursor at start
     }
   }
 }
@@ -609,9 +668,9 @@ colnr_T getvcol_nolist(pos_T *posp)
 
   curwin->w_p_list = false;
   if (posp->coladd) {
-    getvvcol(curwin, posp, NULL, &vcol, NULL);
+    getvvcol(curwin, posp, NULL, &vcol, NULL, 0);
   } else {
-    getvcol(curwin, posp, NULL, &vcol, NULL);
+    getvcol(curwin, posp, NULL, &vcol, NULL, 0);
   }
   curwin->w_p_list = list_save;
   return vcol;
@@ -624,13 +683,14 @@ colnr_T getvcol_nolist(pos_T *posp)
 /// @param start
 /// @param cursor
 /// @param end
-void getvvcol(win_T *wp, pos_T *pos, colnr_T *start, colnr_T *cursor, colnr_T *end)
+/// @param flags
+void getvvcol(win_T *wp, pos_T *pos, colnr_T *start, colnr_T *cursor, colnr_T *end, int flags)
 {
   colnr_T col;
 
   if (virtual_active(wp)) {
     // For virtual mode, only want one value
-    getvcol(wp, pos, &col, NULL, NULL);
+    getvcol(wp, pos, &col, NULL, NULL, flags);
 
     colnr_T coladd = pos->coladd;
     colnr_T endadd = 0;
@@ -643,8 +703,7 @@ void getvvcol(win_T *wp, pos_T *pos, colnr_T *start, colnr_T *cursor, colnr_T *e
       if ((c != TAB) && vim_isprintc(c)) {
         endadd = (colnr_T)(ptr2cells(ptr + pos->col) - 1);
         if (coladd > endadd) {
-          // past end of line
-          endadd = 0;
+          endadd = 0;  // past end of line
         } else {
           coladd = 0;
         }
@@ -655,16 +714,14 @@ void getvvcol(win_T *wp, pos_T *pos, colnr_T *start, colnr_T *cursor, colnr_T *e
     if (start != NULL) {
       *start = col;
     }
-
     if (cursor != NULL) {
       *cursor = col;
     }
-
     if (end != NULL) {
       *end = col + endadd;
     }
   } else {
-    getvcol(wp, pos, start, cursor, end);
+    getvcol(wp, pos, start, cursor, end, flags);
   }
 }
 
@@ -676,7 +733,8 @@ void getvvcol(win_T *wp, pos_T *pos, colnr_T *start, colnr_T *cursor, colnr_T *e
 /// @param pos2
 /// @param left
 /// @param right
-void getvcols(win_T *wp, pos_T *pos1, pos_T *pos2, colnr_T *left, colnr_T *right)
+/// @param flags
+void getvcols(win_T *wp, pos_T *pos1, pos_T *pos2, colnr_T *left, colnr_T *right, int flags)
 {
   colnr_T from1;
   colnr_T from2;
@@ -684,11 +742,11 @@ void getvcols(win_T *wp, pos_T *pos1, pos_T *pos2, colnr_T *left, colnr_T *right
   colnr_T to2;
 
   if (lt(*pos1, *pos2)) {
-    getvvcol(wp, pos1, &from1, NULL, &to1);
-    getvvcol(wp, pos2, &from2, NULL, &to2);
+    getvvcol(wp, pos1, &from1, NULL, &to1, flags);
+    getvvcol(wp, pos2, &from2, NULL, &to2, flags);
   } else {
-    getvvcol(wp, pos2, &from1, NULL, &to1);
-    getvvcol(wp, pos1, &from2, NULL, &to2);
+    getvvcol(wp, pos2, &from1, NULL, &to1, flags);
+    getvvcol(wp, pos1, &from2, NULL, &to2, flags);
   }
 
   if (from2 < from1) {
@@ -726,17 +784,7 @@ bool win_may_fill(win_T *wp)
 /// @return Number of filler lines above lnum
 int win_get_fill(win_T *wp, linenr_T lnum)
 {
-  int virt_lines = decor_virt_lines(wp, lnum - 1, lnum, NULL, NULL, true);
-
-  // be quick when there are no filler lines
-  if (diffopt_filler()) {
-    int n = diff_check_fill(wp, lnum);
-
-    if (n > 0) {
-      return virt_lines + n;
-    }
-  }
-  return virt_lines;
+  return decor_virt_lines(wp, lnum - 1, lnum, NULL, NULL, true) + diff_check_fill(wp, lnum);
 }
 
 /// Return the number of window lines occupied by buffer line "lnum".
@@ -818,7 +866,7 @@ int plines_win_nofold(win_T *wp, linenr_T lnum)
 }
 
 /// Like plines_win(), but only reports the number of physical screen lines
-/// used from the start of the line to the given column number.
+/// used from the start of the line to the given byte column.
 int plines_win_col(win_T *wp, linenr_T lnum, long column)
 {
   // Check for filler lines above this buffer line.
@@ -841,12 +889,12 @@ int plines_win_col(win_T *wp, linenr_T lnum, long column)
   StrCharInfo ci = utf_ptr2StrCharInfo(line);
   if (cstype == kCharsizeFast) {
     bool const use_tabstop = csarg.use_tabstop;
-    while (*ci.ptr != NUL && --column >= 0) {
+    while (*ci.ptr != NUL && ci.ptr < line + column) {
       vcol += charsize_fast_impl(wp, ci.ptr, use_tabstop, vcol, ci.chr.value).width;
       ci = utfc_next(ci);
     }
   } else {
-    while (*ci.ptr != NUL && --column >= 0) {
+    while (*ci.ptr != NUL && ci.ptr < line + column) {
       vcol += charsize_regular(&csarg, ci.ptr, vcol, ci.chr.value).width;
       ci = utfc_next(ci);
     }
@@ -1032,4 +1080,18 @@ int64_t win_text_height(win_T *const wp, const linenr_T start_lnum, const int64_
     *fill = height_sum_fill;
   }
   return height_sum_fill + height_sum_nofill;
+}
+
+/// Return the maximum display width of lines "first" through "last".
+///
+/// @param max  stop measuring once this width is reached
+///
+/// @return  maximum display width, capped at "max"
+int win_max_displaywidth(win_T *wp, linenr_T first, linenr_T last, int max)
+{
+  int width = 0;
+  for (linenr_T lnum = first; lnum <= last && width < max; lnum++) {
+    width = MAX(width, linetabsize(wp, lnum));
+  }
+  return MIN(max, width);
 }

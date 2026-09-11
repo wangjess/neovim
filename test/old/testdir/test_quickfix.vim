@@ -670,6 +670,150 @@ func Test_browse()
   call Xtest_browse('l')
 endfunc
 
+" Test for memory allocation failures
+func Xnomem_tests(cchar)
+  call s:setup_commands(a:cchar)
+
+  call test_alloc_fail(GetAllocId('qf_dirname_start'), 0, 0)
+  call assert_fails('Xvimgrep vim runtest.vim', 'E342:')
+
+  call test_alloc_fail(GetAllocId('qf_dirname_now'), 0, 0)
+  call assert_fails('Xvimgrep vim runtest.vim', 'E342:')
+
+  call test_alloc_fail(GetAllocId('qf_namebuf'), 0, 0)
+  call assert_fails('Xfile runtest.vim', 'E342:')
+
+  call test_alloc_fail(GetAllocId('qf_errmsg'), 0, 0)
+  call assert_fails('Xfile runtest.vim', 'E342:')
+
+  call test_alloc_fail(GetAllocId('qf_pattern'), 0, 0)
+  call assert_fails('Xfile runtest.vim', 'E342:')
+
+  call test_alloc_fail(GetAllocId('qf_efm_fmtstr'), 0, 0)
+  set efm=%f
+  call assert_fails('Xexpr ["Xfile1"]', 'E342:')
+  set efm&
+
+  call test_alloc_fail(GetAllocId('qf_efm_fmtpart'), 0, 0)
+  set efm=%f:%l:%m,%f-%l-%m
+  call assert_fails('Xaddexpr ["Xfile2", "Xfile3"]', 'E342:')
+  set efm&
+
+  call test_alloc_fail(GetAllocId('qf_title'), 0, 0)
+  call assert_fails('Xexpr ""', 'E342:')
+  call assert_equal('', g:Xgetlist({'all': 1}).title)
+
+  call test_alloc_fail(GetAllocId('qf_mef_name'), 0, 0)
+  set makeef=Xtmp##.err
+  call assert_fails('Xgrep needle haystack', 'E342:')
+  set makeef&
+
+  call test_alloc_fail(GetAllocId('qf_qfline'), 0, 0)
+  call assert_fails('Xexpr "Xfile1:10:Line10"', 'E342:')
+
+  if a:cchar == 'l'
+    for id in ['qf_qfline', 'qf_qfinfo']
+      lgetexpr ["Xfile1:10:L10", "Xfile2:20:L20"]
+      call test_alloc_fail(GetAllocId(id), 0, 0)
+      call assert_fails('new', 'E342:')
+      call assert_equal(2, winnr('$'))
+      call assert_equal([], getloclist(0))
+      %bw!
+    endfor
+  endif
+
+  call test_alloc_fail(GetAllocId('qf_qfline'), 0, 0)
+  try
+    call assert_fails('Xvimgrep vim runtest.vim', 'E342:')
+  catch /^Vim:Interrupt$/
+  endtry
+
+  call test_alloc_fail(GetAllocId('qf_qfline'), 0, 0)
+  try
+    call assert_fails('Xvimgrep /vim/f runtest.vim', 'E342:')
+  catch /^Vim:Interrupt$/
+  endtry
+
+  let l = getqflist({"lines": ["Xfile1:10:L10"]})
+  call test_alloc_fail(GetAllocId('qf_qfline'), 0, 0)
+  call assert_fails('call g:Xsetlist(l.items)', 'E342:')
+
+  call test_alloc_fail(GetAllocId('qf_qfline'), 0, 0)
+  try
+    call assert_fails('Xhelpgrep quickfix', 'E342:')
+  catch /^Vim:Interrupt$/
+  endtry
+
+  call test_alloc_fail(GetAllocId('qf_qfinfo'), 0, 0)
+  call assert_fails('let l = g:Xgetlist({"lines": ["Xfile1:10:L10"]})', 'E342:')
+  call assert_equal(#{items: []}, l)
+
+  if a:cchar == 'l'
+    call setqflist([], 'f')
+    call setloclist(0, [], 'f')
+    call test_alloc_fail(GetAllocId('qf_qfinfo'), 0, 0)
+    call assert_fails('lhelpgrep quickfix', 'E342:')
+    call assert_equal([], getloclist(0))
+
+    call test_alloc_fail(GetAllocId('qf_qfinfo'), 0, 0)
+    call assert_fails('lvimgrep vim runtest.vim', 'E342:')
+
+    let l = getqflist({"lines": ["Xfile1:10:L10"]})
+    call test_alloc_fail(GetAllocId('qf_qfinfo'), 0, 0)
+    call assert_fails('call setloclist(0, l.items)', 'E342:')
+
+    call test_alloc_fail(GetAllocId('qf_qfinfo'), 0, 0)
+    call assert_fails('lbuffer', 'E342:')
+
+    call test_alloc_fail(GetAllocId('qf_qfinfo'), 0, 0)
+    call assert_fails('lexpr ["Xfile1:10:L10", "Xfile2:20:L20"]', 'E342:')
+
+    call test_alloc_fail(GetAllocId('qf_qfinfo'), 0, 0)
+    call assert_fails('lfile runtest.vim', 'E342:')
+  endif
+
+  call test_alloc_fail(GetAllocId('qf_dirstack'), 0, 0)
+  set efm=%DEntering\ dir\ %f,%f:%l:%m
+  call assert_fails('Xexpr ["Entering dir abc", "abc.txt:1:Hello world"]', 'E342:')
+  set efm&
+
+  call test_alloc_fail(GetAllocId('qf_dirstack'), 0, 0)
+  set efm=%+P[%f],(%l)%m
+  call assert_fails('Xexpr ["[runtest.vim]", "(1)Hello"]', 'E342:')
+  set efm&
+
+  call test_alloc_fail(GetAllocId('qf_multiline_pfx'), 0, 0)
+  set efm=%EError,%Cline\ %l,%Z%m
+  call assert_fails('Xexpr ["Error", "line 1", "msg"]', 'E342:')
+  set efm&
+
+  call test_alloc_fail(GetAllocId('qf_makecmd'), 0, 0)
+  call assert_fails('Xgrep vim runtest.vim', 'E342:')
+
+  call test_alloc_fail(GetAllocId('qf_linebuf'), 0, 0)
+  call assert_fails('Xexpr repeat("a", 8192)', 'E342:')
+
+  call test_alloc_fail(GetAllocId('qf_linebuf'), 0, 0)
+  call assert_fails('Xexpr [repeat("a", 8192)]', 'E342:')
+
+  new
+  call setline(1, repeat('a', 8192))
+  call test_alloc_fail(GetAllocId('qf_linebuf'), 0, 0)
+  call assert_fails('Xbuffer', 'E342:')
+  %bw!
+
+  call writefile([repeat('a', 8192)], 'Xtest')
+  call test_alloc_fail(GetAllocId('qf_linebuf'), 0, 0)
+  call assert_fails('Xfile Xtest', 'E342:')
+  call delete('Xtest')
+endfunc
+
+func Test_nomem()
+  throw 'Skipped: Nvim does not support test_alloc_fail()'
+  call Xnomem_tests('c')
+  call Xnomem_tests('l')
+endfunc
+
 func s:test_xhelpgrep(cchar)
   call s:setup_commands(a:cchar)
   Xhelpgrep quickfix
@@ -2174,6 +2318,53 @@ func Test_adjust_lnum()
   call Xadjust_qflnum('c')
   call setqflist([])
   call Xadjust_qflnum('l')
+endfunc
+
+func Xqf_undo_after_delete(cchar)
+  call s:setup_commands(a:cchar)
+
+  enew | only
+
+  let fname = 'Xqfundofile' . a:cchar
+  call s:create_test_file(fname)
+  exe 'edit ' . fname
+
+  Xgetexpr [fname . ':5:Line5',
+	      \ fname . ':10:Line10',
+	      \ fname . ':15:Line15']
+
+  " Delete the line of the second error and undo the deletion.
+  10delete
+  let l = g:Xgetlist()
+  call assert_equal(5, l[0].lnum)
+  call assert_equal(10, l[1].lnum)
+  call assert_equal(14, l[2].lnum)
+
+  undo
+  call assert_equal('Line10', getline(10))
+  let l = g:Xgetlist()
+  call assert_equal(5, l[0].lnum)
+  call assert_equal(10, l[1].lnum)
+  call assert_equal(15, l[2].lnum)
+
+  " Redo and undo again to make sure the line number does not drift.
+  redo
+  call assert_equal(14, g:Xgetlist()[2].lnum)
+  undo
+  let l = g:Xgetlist()
+  call assert_equal(10, l[1].lnum)
+  call assert_equal(15, l[2].lnum)
+
+  call g:Xsetlist([], 'f')
+  enew!
+  call delete(fname)
+endfunc
+
+func Test_qf_undo_after_delete()
+  call setloclist(0, [])
+  call Xqf_undo_after_delete('c')
+  call setqflist([])
+  call Xqf_undo_after_delete('l')
 endfunc
 
 " Tests for the :grep/:lgrep and :grepadd/:lgrepadd commands
@@ -4804,7 +4995,7 @@ endfunc
 " Test for parsing entries using visual screen column
 func Test_viscol()
   enew
-  call writefile(["Col1\tCol2\tCol3"], 'Xfile1')
+  call writefile(["Col1\tCol2\tCol3"], 'Xfile1', 'D')
   edit Xfile1
 
   " Use byte offset for column number
@@ -4869,7 +5060,34 @@ func Test_viscol()
 
   enew | only
   set efm&
-  call delete('Xfile1')
+endfunc
+
+" Test that '%v' is not affected by 'tabstop': a <tab> is always counted as
+" 8 screen columns, matching the column numbers reported by compilers.
+func Test_viscol_tabstop()
+  enew
+  call writefile(["\tABCDEFGH"], 'Xfile1', 'D')
+  edit Xfile1
+  set efm=%f:%l:%v:%m
+
+  " gcc reports column 9 for 'A' (the <tab> expands to 8 columns).  The jump
+  " must land on 'A' (byte 2) for any 'tabstop' value.
+  for ts in [8, 4, 2, 13]
+    exe 'setlocal tabstop=' .. ts
+    cexpr "Xfile1:1:9:XX"
+    call assert_equal(2, col('.'), 'tabstop=' .. ts)
+  endfor
+
+  " A multi-byte character after the tab: 'ä' is 2 bytes but 1 screen cell,
+  " so screen column 10 is the next character 'b' (byte 4).
+  call writefile(["\täbc"], 'Xfile1')
+  edit! Xfile1
+  setlocal tabstop=4
+  cexpr "Xfile1:1:10:XX"
+  call assert_equal(4, col('.'))
+
+  enew | only
+  set efm&
 endfunc
 
 " Test for the quickfix window buffer
@@ -5530,7 +5748,9 @@ func Xtest_qftextfunc(cchar)
   Xwindow
   call assert_equal(['green', 'blue'], getline(1, '$'))
   Xclose
-  call assert_equal("{d -> map(g:Xgetlist({'id' : d.id, 'items' : 1}).items[d.start_idx-1:d.end_idx-1], 'v:val.text')}", &quickfixtextfunc)
+  " A callback option stores the resolved funcref, so a lambda reads back as its <lambda> handle
+  " (consistent with the per-list 'quickfixtextfunc' below).
+  call assert_match("function('<lambda>\\d\\+')", &quickfixtextfunc)
   set quickfixtextfunc&
 
   " use a lambda function that returns an empty list
@@ -6833,6 +7053,126 @@ func Test_vimgrep_dummy_buffer_keep()
 
   unlet! s:dummy_buf
   autocmd! DummyKeep
+  %bw!
+endfunc
+
+func Test_quickfix_restore_current_win()
+  let curwin = win_getid()
+  vsplit Xb
+  wincmd p
+  botright copen
+  cclose
+
+  call assert_equal(curwin, win_getid())
+  bw! Xb
+endfunc
+
+func Test_quickfixtextfunc_wipes_buffer()
+  let g:crash=""
+  new
+  fu QFexpr(dummy)
+    bw
+  endfu
+  try
+    set quickfixtextfunc=QFexpr
+    lad "['0:4:e']"
+    lw
+  catch /^Vim\%((\S\+)\)\=:E565:/
+    let g:crash='caught'
+  endtry
+  " close location list window
+  bw
+  delfunc QFexpr
+  set quickfixtextfunc=
+  call assert_equal('caught', g:crash)
+  unlet g:crash
+  " close the newly opened window
+  bw
+endfunc
+
+func Test_quickfix_longline_noeol()
+  let qf = 'Xquickfix'
+  let args = $"-q {qf}"
+  let after =<< trim [CODE]
+    call writefile(['okay'], "XDONE")
+    qall!
+  [CODE]
+  defer delete("XDONE")
+  call writefile([repeat('A', 1024)], qf, 'bD')
+  call RunVim([], after, args)
+  call WaitForAssert({-> assert_true(filereadable("XDONE"))})
+  call assert_equal(['okay'], readfile("XDONE"))
+endfunc
+
+func Test_efm_overlongline()
+  let save_efm = &efm
+  " %r captures the tail.
+  set efm=%+O(%.%#)%r,%f:%l:%m
+
+  " First line is longer than IOSIZE (1025) so the parser puts it in
+  " growbuf; the %r tail then far exceeds IObuff.
+  let lines = ['(short)' .. repeat('x', 4000), 'Xfile:10:msg']
+  call writefile(lines, 'Xqferrlong', 'D')
+
+  " Must complete without hanging or crashing.
+  cgetfile Xqferrlong
+
+  " The well-formed line that follows is still parsed.
+  let well_formed = filter(getqflist(), 'v:val.lnum == 10')
+  call assert_equal(1, len(well_formed))
+  call assert_equal('msg', well_formed[0].text)
+
+  let &efm = save_efm
+  call setqflist([], 'f')
+endfunc
+
+func Xtest_set_qftf_in_sandbox(cchar)
+  call s:setup_commands(a:cchar)
+
+  call g:Xsetlist([{'filename': 'test.c', 'lnum': 1, 'text': 'trigger'}])
+  let g:qftf_fn_called = v:false
+  func Qftf_Fn(d)
+    let g:qftf_fn_called = v:true
+    return []
+  endfunc
+
+  let g:caught_exception = v:false
+  try
+    sandbox call g:Xsetlist([], 'a', #{quickfixtextfunc: 'g:Qftf_Fn'})
+  catch /E48:/
+    let g:caught_exception = v:true
+  endtry
+  copen
+  cclose
+
+  call assert_equal(v:true, g:caught_exception)
+  call assert_equal(v:false, g:qftf_fn_called)
+
+  delfunc Qftf_Fn
+  unlet g:caught_exception
+  unlet g:qftf_fn_called
+  %bw!
+endfunc
+
+" Test for setting the 'quickfixtextfunc' in a sandbox
+func Test_set_qftf_in_sandbox()
+  call Xtest_set_qftf_in_sandbox('c')
+  call Xtest_set_qftf_in_sandbox('l')
+endfunc
+
+" Test for the 'statusline' height remaining at one when the quickfix buffer
+" is wiped out when quickfix window is the only window open.
+func Test_qf_statusline_height()
+  %bw!
+  copen
+  wincmd p
+  let prev_wh = winheight('.')
+  wincmd p
+  only
+  bw!
+  copen
+  wincmd p
+  call assert_equal(prev_wh, winheight('.'))
   %bw!
 endfunc
 

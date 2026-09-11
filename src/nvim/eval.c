@@ -20,12 +20,13 @@
 #include "nvim/channel.h"
 #include "nvim/charset.h"
 #include "nvim/cmdexpand_defs.h"
+#include "nvim/context.h"
 #include "nvim/cursor.h"
-#include "nvim/edit.h"
 #include "nvim/errors.h"
 #include "nvim/eval.h"
 #include "nvim/eval/encode.h"
 #include "nvim/eval/executor.h"
+#include "nvim/eval/funcs.h"
 #include "nvim/eval/gc.h"
 #include "nvim/eval/typval.h"
 #include "nvim/eval/userfunc.h"
@@ -43,6 +44,7 @@
 #include "nvim/globals.h"
 #include "nvim/hashtab.h"
 #include "nvim/highlight_group.h"
+#include "nvim/insert.h"
 #include "nvim/insexpand.h"
 #include "nvim/keycodes.h"
 #include "nvim/lib/queue_defs.h"
@@ -79,6 +81,7 @@
 #include "nvim/strings.h"
 #include "nvim/tag.h"
 #include "nvim/types_defs.h"
+#include "nvim/ui.h"
 #include "nvim/undo.h"
 #include "nvim/vim_defs.h"
 #include "nvim/window.h"
@@ -205,14 +208,12 @@ void eval_init(void)
   func_init();
 }
 
-#if defined(EXITFREE)
+#ifdef EXITFREE
 void eval_clear(void)
 {
   evalvars_clear();
   free_scriptnames();  // must come after evalvars_clear().
-# ifdef HAVE_WORKING_LIBINTL
   free_locales();
-# endif
 
   // autoloaded script names
   free_autoload_scriptnames();
@@ -234,7 +235,7 @@ void fill_evalarg_from_eap(evalarg_T *evalarg, exarg_T *eap, bool skip)
     return;
   }
 
-  if (sourcing_a_script(eap)) {
+  if (sourcing_a_script(eap) || eap->ea_getline == get_list_line) {
     evalarg->eval_getline = eap->ea_getline;
     evalarg->eval_cookie = eap->cookie;
   }
@@ -709,6 +710,59 @@ void *call_func_retlist(const char *func, int argc, typval_T *argv)
   return rettv.vval.v_list;
 }
 
+/// Evaluate a number-valued "expr" option ('indentexpr'/'formatexpr') via its callback.
+///
+/// Copies the callback first (the option could be changed while evaluating it) and suppresses
+/// errors; evaluates in the sandbox when `use_sandbox`. `v:` context, `current_sctx` and any
+/// textlock are the caller's responsibility.
+///
+/// @return  The number result, or -1 on failure.
+int eval_expr_option_number(Callback *cb, bool use_sandbox)
+{
+  Callback copy;
+  callback_copy(&copy, cb);
+  if (use_sandbox) {
+    sandbox++;
+  }
+  emsg_off++;
+  typval_T tv;
+  typval_T argv[1];
+  int retval = -1;
+  if (callback_call(&copy, 0, argv, &tv)) {
+    retval = (int)tv_get_number_chk(&tv, NULL);
+    tv_clear(&tv);
+  }
+  emsg_off--;
+  if (use_sandbox) {
+    sandbox--;
+  }
+  callback_free(&copy);
+  return retval;
+}
+
+/// Evaluate a "expr" option ('foldtext'/'includeexpr') via its callback, under |textlock| and an
+/// isolated funccal stack; evaluates in the |sandbox| when `use_sandbox`. The caller sets up `v:`
+/// context and interprets `*ret_tv` (which it must clear on success).
+///
+/// @return  Whether the callback was called (result in `*ret_tv`).
+bool eval_expr_option_tv(Callback *cb, bool use_sandbox, typval_T *ret_tv)
+{
+  funccal_entry_T funccal_entry;
+  save_funccal(&funccal_entry);
+  if (use_sandbox) {
+    sandbox++;
+  }
+  textlock++;
+  typval_T argv[1];
+  bool ok = callback_call(cb, 0, argv, ret_tv);
+  textlock--;
+  if (use_sandbox) {
+    sandbox--;
+  }
+  restore_funccal();
+  return ok;
+}
+
 /// Evaluate 'foldexpr'.  Returns the foldlevel, and any character preceding
 /// it in "*cp".  Doesn't give error messages.
 int eval_foldexpr(win_T *wp, int *cp)
@@ -716,7 +770,7 @@ int eval_foldexpr(win_T *wp, int *cp)
   const sctx_T saved_sctx = current_sctx;
   const bool use_sandbox = was_set_insecurely(wp, kOptFoldexpr, OPT_LOCAL);
 
-  char *arg = skipwhite(wp->w_p_fde);
+  // 'foldexpr' (string) evaluates in the script where it was set; current line is v:lnum.
   current_sctx = wp->w_p_script_ctx[kWinOptFoldexpr];
 
   emsg_off++;
@@ -727,10 +781,9 @@ int eval_foldexpr(win_T *wp, int *cp)
   *cp = NUL;
 
   typval_T tv;
+  typval_T argv[1];  // Unused: func 'foldexpr' takes no args (v:lnum legacy).
   varnumber_T retval;
-  // Evaluate the expression.  If the expression is "FuncName()" call the
-  // function directly.
-  if (eval0_simple_funccal(arg, &tv, NULL, &EVALARG_EVALUATE) == FAIL) {
+  if (!callback_call(&wp->w_p_fde, 0, argv, &tv)) {
     retval = 0;
   } else {
     // If the result is a number, just return the number.
@@ -755,7 +808,6 @@ int eval_foldexpr(win_T *wp, int *cp)
     sandbox--;
   }
   textlock--;
-  clear_evalarg(&EVALARG_EVALUATE, NULL);
   current_sctx = saved_sctx;
 
   return (int)retval;
@@ -765,18 +817,9 @@ int eval_foldexpr(win_T *wp, int *cp)
 Object eval_foldtext(win_T *wp)
 {
   const bool use_sandbox = was_set_insecurely(wp, kOptFoldtext, OPT_LOCAL);
-  char *arg = wp->w_p_fdt;
-  funccal_entry_T funccal_entry;
-
-  save_funccal(&funccal_entry);
-  if (use_sandbox) {
-    sandbox++;
-  }
-  textlock++;
-
   typval_T tv;
   Object retval;
-  if (eval0_simple_funccal(arg, &tv, NULL, &EVALARG_EVALUATE) == FAIL) {
+  if (!eval_expr_option_tv(&wp->w_p_fdt, use_sandbox, &tv)) {
     retval = STRING_OBJ(NULL_STRING);
   } else {
     if (tv.v_type == VAR_LIST) {
@@ -786,14 +829,6 @@ Object eval_foldtext(win_T *wp)
     }
     tv_clear(&tv);
   }
-  clear_evalarg(&EVALARG_EVALUATE, NULL);
-
-  if (use_sandbox) {
-    sandbox--;
-  }
-  textlock--;
-  restore_funccal();
-
   return retval;
 }
 
@@ -1315,9 +1350,13 @@ void set_var_lval(lval_T *lp, char *endp, typval_T *rettv, bool copy, const bool
         }
       } else {
         bool error = false;
-        const char val = (char)tv_get_number_chk(rettv, &error);
+        const varnumber_T val = tv_get_number_chk(rettv, &error);
         if (!error) {
-          tv_blob_set_append(lp->ll_blob, lp->ll_n1, (uint8_t)val);
+          if (val < 0 || val > 255) {
+            semsg(_(e_invalid_value_for_blob_nr), val);
+          } else {
+            tv_blob_set_append(lp->ll_blob, lp->ll_n1, (uint8_t)val);
+          }
         }
       }
     } else if (op != NULL && *op != '=') {
@@ -2229,11 +2268,19 @@ static void eval_addblob(typval_T *tv1, typval_T *tv2)
   const blob_T *const b2 = tv2->vval.v_blob;
   blob_T *const b = tv_blob_alloc();
 
-  for (int i = 0; i < tv_blob_len(b1); i++) {
-    ga_append(&b->bv_ga, tv_blob_get(b1, i));
-  }
-  for (int i = 0; i < tv_blob_len(b2); i++) {
-    ga_append(&b->bv_ga, tv_blob_get(b2, i));
+  int64_t len1 = tv_blob_len(b1);
+  int64_t len2 = tv_blob_len(b2);
+  int64_t totallen = len1 + len2;
+
+  if (totallen >= 0 && totallen <= INT_MAX) {
+    ga_grow(&b->bv_ga, (int)totallen);
+    if (len1 > 0) {
+      memmove((char *)b->bv_ga.ga_data, b1->bv_ga.ga_data, (size_t)len1);
+    }
+    if (len2 > 0) {
+      memmove((char *)b->bv_ga.ga_data + len1, b2->bv_ga.ga_data, (size_t)len2);
+    }
+    b->bv_ga.ga_len = (int)totallen;
   }
 
   tv_clear(tv1);
@@ -2255,6 +2302,23 @@ static int eval_addlist(typval_T *tv1, typval_T *tv2)
   return OK;
 }
 
+/// Append string "s2" to the string in "tv1".
+/// Returns OK if "tv1" was grown in place, FAIL otherwise.
+int grow_string_tv(typval_T *tv1, const char *s2)
+{
+  if (tv1->v_type != VAR_STRING || tv1->vval.v_string == NULL) {
+    return FAIL;
+  }
+
+  size_t len1 = strlen(tv1->vval.v_string);
+  size_t len2 = strlen(s2);
+  char *p = xrealloc(tv1->vval.v_string, len1 + len2 + 1);
+
+  memmove(p + len1, s2, len2 + 1);
+  tv1->vval.v_string = p;
+  return OK;
+}
+
 /// Concatenate strings "tv1" and "tv2" and store the result in "tv1".
 static int eval_concat_str(typval_T *tv1, typval_T *tv2)
 {
@@ -2267,6 +2331,11 @@ static int eval_concat_str(typval_T *tv1, typval_T *tv2)
     tv_clear(tv1);
     tv_clear(tv2);
     return FAIL;
+  }
+
+  // When possible, grow the existing string in place to avoid alloc/free.
+  if (grow_string_tv(tv1, s2) == OK) {
+    return OK;
   }
 
   char *p = concat_str(s1, s2);
@@ -2716,7 +2785,7 @@ static int eval7(char **arg, typval_T *rettv, evalarg_T *const evalarg, bool wan
         *arg = skipwhite(*arg);
         ret = eval_func(arg, evalarg, s, len, rettv, flags, NULL);
       } else if (evaluate) {
-        // get value of variable
+        // get the value of a variable
         ret = eval_variable(s, len, rettv, NULL, true, false);
       } else {
         // skip the name
@@ -2784,7 +2853,8 @@ static int eval7_leader(typval_T *const rettv, const bool numeric_only,
           break;
         }
         if (rettv->v_type == VAR_FLOAT) {
-          f = !(bool)f;
+          rettv->v_type = VAR_BOOL;
+          val = f == 0.0 ? kBoolVarTrue : kBoolVarFalse;
         } else {
           val = !val;
         }
@@ -3369,10 +3439,11 @@ int eval_option(const char **const arg, typval_T *const rettv, const bool evalua
 
     ret = FAIL;
   } else if (rettv != NULL) {
-    OptVal value = is_tty_opt ? get_tty_option(*arg) : get_option_value(opt_idx, opt_flags);
-    assert(value.type != kOptValTypeNil);
+    Object value = is_tty_opt ? get_tty_option(*arg) : get_option_value(opt_idx, opt_flags);
+    assert(value.type != kObjectTypeNil);
 
-    *rettv = optval_as_tv(value, true);
+    *rettv = opt_to_tv(value, true);
+    optval_free(value);
   } else if (working && !is_tty_opt && is_option_hidden(opt_idx)) {
     ret = FAIL;
   }
@@ -4008,11 +4079,11 @@ bool garbage_collect(bool testing)
     // buffer callback functions
     ABORTING(set_ref_in_callback)(&buf->b_prompt_callback, copyID, NULL, NULL);
     ABORTING(set_ref_in_callback)(&buf->b_prompt_interrupt, copyID, NULL, NULL);
-    ABORTING(set_ref_in_callback)(&buf->b_cfu_cb, copyID, NULL, NULL);
-    ABORTING(set_ref_in_callback)(&buf->b_ofu_cb, copyID, NULL, NULL);
-    ABORTING(set_ref_in_callback)(&buf->b_tsrfu_cb, copyID, NULL, NULL);
-    ABORTING(set_ref_in_callback)(&buf->b_tfu_cb, copyID, NULL, NULL);
-    ABORTING(set_ref_in_callback)(&buf->b_ffu_cb, copyID, NULL, NULL);
+    ABORTING(set_ref_in_callback)(&buf->b_p_cfu, copyID, NULL, NULL);
+    ABORTING(set_ref_in_callback)(&buf->b_p_ofu, copyID, NULL, NULL);
+    ABORTING(set_ref_in_callback)(&buf->b_p_tsrfu, copyID, NULL, NULL);
+    ABORTING(set_ref_in_callback)(&buf->b_p_tfu, copyID, NULL, NULL);
+    ABORTING(set_ref_in_callback)(&buf->b_p_ffu, copyID, NULL, NULL);
     if (!abort && buf->b_p_cpt_cb != NULL) {
       ABORTING(set_ref_in_cpt_callbacks)(buf->b_p_cpt_cb, buf->b_p_cpt_count, copyID);
     }
@@ -4035,9 +4106,9 @@ bool garbage_collect(bool testing)
     ABORTING(set_ref_in_item)(&wp->w_winvar.di_tv, copyID, NULL, NULL);
   }
   // window-local variables in autocmd windows
-  for (int i = 0; i < AUCMD_WIN_COUNT; i++) {
-    if (aucmd_win[i].auc_win != NULL) {
-      ABORTING(set_ref_in_item)(&aucmd_win[i].auc_win->w_winvar.di_tv, copyID, NULL, NULL);
+  for (int i = 0; i < CTX_WIN_COUNT; i++) {
+    if (ctx_win[i].cw_win != NULL) {
+      ABORTING(set_ref_in_item)(&ctx_win[i].cw_win->w_winvar.di_tv, copyID, NULL, NULL);
     }
   }
 
@@ -4458,9 +4529,7 @@ static int eval_dict(char **arg, typval_T *rettv, evalarg_T *const evalarg, bool
 
     *arg = skipwhite(*arg + 1);
     if (eval1(arg, &tv, evalarg) == FAIL) {  // Recursive!
-      if (evaluate) {
-        tv_clear(&tvkey);
-      }
+      tv_clear(&tvkey);
       goto failret;
     }
     if (evaluate) {
@@ -4863,8 +4932,6 @@ bool callback_call(Callback *const callback, const int argcount_in, typval_T *co
 
   partial_T *partial;
   char *name;
-  Array args = ARRAY_DICT_INIT;
-  Object rv;
   switch (callback->type) {
   case kCallbackFuncref:
     name = callback->data.funcref;
@@ -4886,9 +4953,37 @@ bool callback_call(Callback *const callback, const int argcount_in, typval_T *co
     name = partial_name(partial);
     break;
 
-  case kCallbackLua:
-    rv = nlua_call_ref(callback->data.luaref, NULL, args, kRetNilBool, NULL, NULL);
-    return LUARET_TRUTHY(rv);
+  case kCallbackLua: {
+    // Call the Lua function with the given args and return its result via rettv.
+    Arena arena = ARENA_EMPTY;
+    Array luaargs = arena_array(&arena, (size_t)argcount_in);
+    for (int i = 0; i < argcount_in; i++) {
+      ADD_C(luaargs, vim_to_object(&argvars_in[i], &arena, false));
+    }
+    Error err = ERROR_INIT;
+    callback_depth++;
+    Object result = nlua_call_ref(callback->data.luaref, NULL, luaargs, kRetObject, &arena, &err);
+    callback_depth--;
+    const bool ok = !ERROR_SET(&err);
+    if (!ok) {
+      semsg_multiline("emsg", "E5108: %s", err.msg);
+      api_clear_error(&err);
+    } else {
+      object_to_vim(result, rettv, NULL);
+    }
+    arena_mem_free(arena_finish(&arena));
+    return ok;
+  }
+
+  case kCallbackExpr: {
+    // Evaluate Vimscript expression ("expr" options).
+    // Optimization: If the expression is "FuncName()" call the function directly.
+    callback_depth++;
+    int r = eval0_simple_funccal(skipwhite(callback->data.expr), rettv, NULL, &EVALARG_EVALUATE);
+    callback_depth--;
+    clear_evalarg(&EVALARG_EVALUATE, NULL);
+    return r == OK;
+  }
 
   case kCallbackNone:
     return false;
@@ -4912,18 +5007,19 @@ bool set_ref_in_callback(Callback *callback, int copyID, ht_stack_T **ht_stack,
 {
   typval_T tv;
   switch (callback->type) {
+  case kCallbackExpr:
   case kCallbackFuncref:
   case kCallbackNone:
+    break;
+
+  case kCallbackLua:
+    // LuaRef is owned by the Lua registry, not traced by Vimscript's mark-sweep; nothing to mark.
     break;
 
   case kCallbackPartial:
     tv.v_type = VAR_PARTIAL;
     tv.vval.v_partial = callback->data.partial;
     return set_ref_in_item(&tv, copyID, ht_stack, list_stack);
-    break;
-
-  case kCallbackLua:
-    abort();
   }
   return false;
 }
@@ -4988,7 +5084,6 @@ void timer_due_cb(TimeWatcher *tw, void *data)
   timer_T *timer = (timer_T *)data;
   int save_did_emsg = did_emsg;
   const int called_emsg_before = called_emsg;
-  const bool save_ex_pressedreturn = get_pressedreturn();
 
   if (timer->stopped || timer->paused) {
     return;
@@ -5015,7 +5110,6 @@ void timer_due_cb(TimeWatcher *tw, void *data)
     }
   }
   did_emsg = save_did_emsg;
-  set_pressedreturn(save_ex_pressedreturn);
 
   if (timer->emsg_count >= 3) {
     timer_stop(timer);
@@ -5260,13 +5354,16 @@ int buf_charidx_to_byteidx(buf_T *buf, linenr_T lnum, int charidx)
 /// @param[in]  dollar_lnum  True when "$" is last line.
 /// @param[out]  ret_fnum  Set to fnum for marks.
 /// @param[in]  charcol  True to return character column.
+/// @param[in]  wp  Window for which to get the position.
 ///
 /// @return Pointer to position or NULL in case of error (e.g. invalid type).
 pos_T *var2fpos(const typval_T *const tv, const bool dollar_lnum, int *const ret_fnum,
-                const bool charcol)
+                const bool charcol, win_T *wp)
   FUNC_ATTR_WARN_UNUSED_RESULT FUNC_ATTR_NONNULL_ALL
 {
   static pos_T pos;
+
+  buf_T *bp = wp->w_buffer;
 
   // Argument can be [lnum, col, coladd].
   if (tv->v_type == VAR_LIST) {
@@ -5279,7 +5376,7 @@ pos_T *var2fpos(const typval_T *const tv, const bool dollar_lnum, int *const ret
 
     // Get the line number.
     pos.lnum = (linenr_T)tv_list_find_nr(l, 0, &error);
-    if (error || pos.lnum <= 0 || pos.lnum > curbuf->b_ml.ml_line_count) {
+    if (error || pos.lnum <= 0 || pos.lnum > bp->b_ml.ml_line_count) {
       // Invalid line number.
       return NULL;
     }
@@ -5291,9 +5388,9 @@ pos_T *var2fpos(const typval_T *const tv, const bool dollar_lnum, int *const ret
     }
     int len;
     if (charcol) {
-      len = mb_charlen(ml_get(pos.lnum));
+      len = mb_charlen(ml_get_buf(bp, pos.lnum));
     } else {
-      len = ml_get_len(pos.lnum);
+      len = ml_get_buf_len(bp, pos.lnum);
     }
 
     // We accept "$" for the column number: last column.
@@ -5328,18 +5425,18 @@ pos_T *var2fpos(const typval_T *const tv, const bool dollar_lnum, int *const ret
   pos.lnum = 0;
   if (name[0] == '.') {
     // cursor
-    pos = curwin->w_cursor;
+    pos = wp->w_cursor;
   } else if (name[0] == 'v' && name[1] == NUL) {
     // Visual start
-    if (VIsual_active) {
-      pos = VIsual;
+    if (Visual.active && wp == curwin) {
+      pos = Visual.start;
     } else {
-      pos = curwin->w_cursor;
+      pos = wp->w_cursor;
     }
   } else if (name[0] == '\'') {
     // mark
     int mname = (uint8_t)name[1];
-    const fmark_T *const fm = mark_get(curbuf, curwin, NULL, kMarkAll, mname);
+    const fmark_T *const fm = mark_get(bp, wp, NULL, kMarkAll, mname);
     if (fm == NULL || fm->mark.lnum <= 0) {
       return NULL;
     }
@@ -5349,7 +5446,7 @@ pos_T *var2fpos(const typval_T *const tv, const bool dollar_lnum, int *const ret
   }
   if (pos.lnum != 0) {
     if (charcol) {
-      pos.col = buf_byteidx_to_charidx(curbuf, pos.lnum, pos.col);
+      pos.col = buf_byteidx_to_charidx(bp, pos.lnum, pos.col);
     }
     return &pos;
   }
@@ -5358,32 +5455,32 @@ pos_T *var2fpos(const typval_T *const tv, const bool dollar_lnum, int *const ret
 
   if (name[0] == 'w' && dollar_lnum) {
     // the "w_valid" flags are not reset when moving the cursor, but they
-    // do matter for update_topline() and validate_botline().
-    check_cursor_moved(curwin);
+    // do matter for update_topline() and validate_botline_win().
+    check_cursor_moved(wp);
 
     pos.col = 0;
     if (name[1] == '0') {               // "w0": first visible line
-      update_topline(curwin);
+      update_topline(wp);
       // In silent Ex mode topline is zero, but that's not a valid line
       // number; use one instead.
-      pos.lnum = curwin->w_topline > 0 ? curwin->w_topline : 1;
+      pos.lnum = wp->w_topline > 0 ? wp->w_topline : 1;
       return &pos;
     } else if (name[1] == '$') {      // "w$": last visible line
-      validate_botline(curwin);
+      validate_botline_win(wp);
       // In silent Ex mode botline is zero, return zero then.
-      pos.lnum = curwin->w_botline > 0 ? curwin->w_botline - 1 : 0;
+      pos.lnum = wp->w_botline > 0 ? wp->w_botline - 1 : 0;
       return &pos;
     }
   } else if (name[0] == '$') {        // last column or line
     if (dollar_lnum) {
-      pos.lnum = curbuf->b_ml.ml_line_count;
+      pos.lnum = bp->b_ml.ml_line_count;
       pos.col = 0;
     } else {
-      pos.lnum = curwin->w_cursor.lnum;
+      pos.lnum = wp->w_cursor.lnum;
       if (charcol) {
-        pos.col = (colnr_T)mb_charlen(get_cursor_line_ptr());
+        pos.col = (colnr_T)mb_charlen(ml_get_buf(bp, wp->w_cursor.lnum));
       } else {
-        pos.col = get_cursor_line_len();
+        pos.col = ml_get_buf_len(bp, wp->w_cursor.lnum);
       }
     }
     return &pos;
@@ -6124,6 +6221,8 @@ void ex_echo(exarg_T *eap)
     if (!eap->skip) {
       if (atstart) {
         atstart = false;
+        msg_ext_set_append(eap->cmdidx == CMD_echon);
+        msg_ext_no_fast();
         msg_ext_set_kind("echo");
         // Call msg_start() after eval1(), evaluating the expression
         // may cause a message to appear.
@@ -6140,7 +6239,6 @@ void ex_echo(exarg_T *eap)
         msg_puts_hl(" ", echo_hl_id, false);
       }
       char *tofree = encode_tv2echo(&rettv, NULL);
-      msg_ext_append = eap->cmdidx == CMD_echon;
       msg_multiline(cstr_as_string(tofree), echo_hl_id, true, false, &need_clear);
       xfree(tofree);
     }
@@ -6149,12 +6247,15 @@ void ex_echo(exarg_T *eap)
   }
   eap->nextcmd = check_nextcmd(arg);
   clear_evalarg(&evalarg, eap);
+  msg_ext_set_append(false);
 
   if (eap->skip) {
     emsg_skip--;
   } else {
     // remove text that may still be there from the command
-    if (need_clear) {
+    if (ui_has(kUIMessages) && (*eap->arg == NUL || *eap->arg == '|' || *eap->arg == '\n')) {
+      msg_puts_len("", 0, 0, false);  // emit "empty" kind msg_show
+    } else if (need_clear) {
       msg_clr_eos();
     }
     if (eap->cmdidx == CMD_echo) {
@@ -6222,11 +6323,13 @@ void ex_execute(exarg_T *eap)
 
   if (ret != FAIL && ga.ga_data != NULL) {
     if (eap->cmdidx == CMD_echomsg) {
+      msg_ext_no_fast();
       msg_ext_set_kind("echomsg");
       msg(ga.ga_data, echo_hl_id);
     } else if (eap->cmdidx == CMD_echoerr) {
       // We don't want to abort following commands, restore did_emsg.
       int save_did_emsg = did_emsg;
+      msg_ext_no_fast();
       emsg_multiline(ga.ga_data, "echoerr", HLF_E, true);
       if (!force_abort) {
         did_emsg = save_did_emsg;
@@ -6308,6 +6411,7 @@ void last_set_msg(sctx_T script_ctx)
 
   bool should_free;
   char *p = get_scriptname(script_ctx, &should_free);
+  msg_ext_skip_verbose = true;  // no verbose kind for last set messages: too noisy
 
   verbose_enter();
   msg_puts(_("\n\tLast set from "));
@@ -6417,7 +6521,7 @@ char *do_string_sub(char *str, size_t len, char *pat, char *sub, typval_T *expr,
     // If it's still empty it was changed and restored, need to restore in
     // the complicated way.
     if (*p_cpo == NUL) {
-      set_option_value_give_err(kOptCpoptions, CSTR_AS_OPTVAL(save_cpo), 0);
+      set_option_value_give_err(kOptCpoptions, CSTR_AS_OBJ(save_cpo), 0);
     }
     free_string_option(save_cpo);
   }
@@ -6632,9 +6736,8 @@ char *prompt_get_input(buf_T *buf)
   linenr_T lnum_last = buf->b_ml.ml_line_count;
 
   char *text = ml_get_buf(buf, lnum_start);
-  char *prompt = prompt_text();
-  if (strlen(text) >= strlen(prompt)) {
-    text += strlen(prompt);
+  if ((int)strlen(text) >= buf->b_prompt_start.mark.col) {
+    text += buf->b_prompt_start.mark.col;
   }
 
   char *full_text = xstrdup(text);
@@ -6645,64 +6748,6 @@ char *prompt_get_input(buf_T *buf)
     xfree(half_text);
   }
   return full_text;
-}
-
-/// Invokes the user-defined callback defined for the current prompt-buffer.
-void prompt_invoke_callback(void)
-{
-  typval_T rettv;
-  typval_T argv[2];
-  linenr_T lnum = curbuf->b_ml.ml_line_count;
-
-  char *user_input = prompt_get_input(curbuf);
-
-  if (!user_input) {
-    return;
-  }
-
-  // Add a new line for the prompt before invoking the callback, so that
-  // text can always be inserted above the last line.
-  ml_append(lnum, "", 0, false);
-  appended_lines_mark(lnum, 1);
-  curwin->w_cursor.lnum = lnum + 1;
-  curwin->w_cursor.col = 0;
-  curbuf->b_prompt_start.mark.lnum = lnum + 1;
-
-  if (curbuf->b_prompt_callback.type == kCallbackNone) {
-    xfree(user_input);
-    goto theend;
-  }
-
-  argv[0].v_type = VAR_STRING;
-  argv[0].vval.v_string = user_input;
-  argv[1].v_type = VAR_UNKNOWN;
-
-  callback_call(&curbuf->b_prompt_callback, 1, argv, &rettv);
-  tv_clear(&argv[0]);
-  tv_clear(&rettv);
-
-theend:
-  // clear undo history on submit
-  u_clearallandblockfree(curbuf);
-
-  curbuf->b_prompt_start.mark.lnum = curbuf->b_ml.ml_line_count;
-}
-
-/// @return  true when the interrupt callback was invoked.
-bool invoke_prompt_interrupt(void)
-{
-  typval_T rettv;
-  typval_T argv[1];
-
-  if (curbuf->b_prompt_interrupt.type == kCallbackNone) {
-    return false;
-  }
-  argv[0].v_type = VAR_UNKNOWN;
-
-  got_int = false;  // don't skip executing commands
-  int ret = callback_call(&curbuf->b_prompt_interrupt, 0, argv, &rettv);
-  tv_clear(&rettv);
-  return ret != FAIL;
 }
 
 /// Compare "typ1" and "typ2".  Put the result in "typ1".

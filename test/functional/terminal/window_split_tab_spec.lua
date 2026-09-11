@@ -2,10 +2,10 @@ local t = require('test.testutil')
 local n = require('test.functional.testnvim')()
 
 local tt = require('test.functional.testterm')
+local describe, it, before_each = t.describe, t.it, t.before_each
 local assert_alive = n.assert_alive
 local clear = n.clear
 local feed = n.feed
-local feed_command = n.feed_command
 local command = n.command
 local eq = t.eq
 local eval = n.eval
@@ -42,29 +42,27 @@ describe(':terminal', function()
   it('does not change size on WinEnter', function()
     feed('<c-\\><c-n>')
     feed('k')
-    feed_command('2split')
+    command('2split')
     screen:expect([[
       ^tty ready                                         |
       rows: 5, cols: 50                                 |
       ==========                                        |
       tty ready                                         |
       rows: 5, cols: 50                                 |
-                                                        |
-                                                        |*2
+                                                        |*3
       ==========                                        |
-      :2split                                           |
+                                                        |
     ]])
-    feed_command('wincmd p')
+    command('wincmd p')
     screen:expect([[
       tty ready                                         |
       rows: 5, cols: 50                                 |
       ==========                                        |
       ^tty ready                                         |
       rows: 5, cols: 50                                 |
-                                                        |
-                                                        |*2
+                                                        |*3
       ==========                                        |
-      :wincmd p                                         |
+                                                        |
     ]])
   end)
 
@@ -102,8 +100,7 @@ describe(':terminal', function()
     screen:expect([[
       tty ready                                      |
       rows: 7, cols: 47                              |
-                                                     |
-                                                     |*3
+                                                     |*4
       ^                                               |
                                                      |
     ]])

@@ -2,6 +2,7 @@ local t = require('test.testutil')
 local n = require('test.functional.testnvim')()
 local Screen = require('test.functional.ui.screen')
 
+local describe, it, before_each, pending = t.describe, t.it, t.before_each, t.pending
 local clear, feed, insert = n.clear, n.feed, n.insert
 local command, neq = n.command, t.neq
 local api = n.api
@@ -282,9 +283,9 @@ describe('Buffer highlighting', function()
       screen:expect {
         grid = [[
         a {5:longer} example                        |
-        ^in {6:order} to {7:de}{5:monstr}{7:ate}                 |
+        in {6:order} to {7:de}{5:monstr}{7:ate}                 |
         {7:combin}{8:ing}{9: hi}ghlights                    |
-        {9:from }{8:diff}{7:erent} sources                  |
+        {9:from }{8:diff}{7:erent} source^s                  |
         {1:~                                       }|*3
         1 change; before #2  {MATCH:.*}|
       ]],

@@ -85,8 +85,9 @@ typedef struct {
   win_T *win;
   int top_row;
   int row;
-  int col_until;
+  int col_last;
   int current;
+  int current_hl_eol;  ///< "current" limited to ranges with "hl_eol"
   int eol_col;
 
   int conceal;
@@ -107,11 +108,12 @@ EXTERN kvec_t(DecorSignHighlight) decor_items INIT( = KV_INITIAL_VALUE);
 #include "decoration.h.generated.h"
 #include "decoration.h.inline.generated.h"
 
-static inline int decor_redraw_col(win_T *wp, int col, int win_col, bool hidden, DecorState *state)
+static inline int decor_redraw_col(win_T *wp, int col, int win_col, bool hidden, DecorState *state,
+                                   int max_col_last)
   FUNC_ATTR_ALWAYS_INLINE
 {
-  if (col <= state->col_until) {
+  if (col <= state->col_last) {
     return state->current;
   }
-  return decor_redraw_col_impl(wp, col, win_col, hidden, state);
+  return decor_redraw_col_impl(wp, col, win_col, hidden, state, max_col_last);
 }

@@ -8,7 +8,7 @@
 local function get_commentstring(ref_position)
   local buf_cs = vim.bo.commentstring
 
-  local ts_parser = vim.treesitter.get_parser(0, '', { error = false })
+  local ts_parser = vim.treesitter.get_parser(0, '')
   if not ts_parser then
     return buf_cs
   end
@@ -68,7 +68,7 @@ local function get_comment_parts(ref_position)
   local cs = get_commentstring(ref_position)
 
   if cs == nil or cs == '' then
-    vim.api.nvim_echo({ { "Option 'commentstring' is empty.", 'WarningMsg' } }, true, {})
+    vim.api.nvim_echo({ { "Option 'commentstring' is empty.", 'WarningMsg' } }, true)
     return { left = '', right = '' }
   end
 
@@ -221,7 +221,7 @@ local function operator(mode)
   -- Used without arguments as part of expression mapping. Otherwise it is
   -- called as 'operatorfunc'.
   if mode == nil then
-    vim.o.operatorfunc = "v:lua.require'vim._comment'.operator"
+    vim.o.operatorfunc = operator
     return 'g@'
   end
 

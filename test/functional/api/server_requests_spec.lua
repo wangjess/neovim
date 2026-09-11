@@ -3,13 +3,15 @@
 local t = require('test.testutil')
 local n = require('test.functional.testnvim')()
 
+local describe, it, before_each, after_each, pending, finally =
+  t.describe, t.it, t.before_each, t.after_each, t.pending, t.finally
 local clear, eval = n.clear, n.eval
 local eq, neq, run, stop = t.eq, t.neq, n.run, n.stop
 local nvim_prog, command, fn = n.nvim_prog, n.command, n.fn
 local source, next_msg = n.source, n.next_msg
 local ok = t.ok
 local api = n.api
-local set_session = n.set_session
+local new_session, set_session = n.new_session, n.set_session
 local pcall_err = t.pcall_err
 local assert_alive = n.assert_alive
 
@@ -246,7 +248,7 @@ describe('server -> client', function()
       ]])
       api.nvim_set_var('args', {
         nvim_prog,
-        '-ll',
+        '-l',
         'test/functional/api/rpc_fixture.lua',
         package.path,
         package.cpath,
@@ -297,7 +299,7 @@ describe('server -> client', function()
       eq(serverpid, fn.getpid())
       eq('hello', api.nvim_get_current_line())
 
-      -- method calls work both ways
+      -- Method calls work both ways.
       fn.rpcrequest(client_id, 'nvim_set_current_line', 'howdy!')
       eq(id, fn.rpcrequest(client_id, 'nvim_get_chan_info', 0).id)
 
@@ -305,15 +307,19 @@ describe('server -> client', function()
       eq(clientpid, fn.getpid())
       eq('howdy!', api.nvim_get_current_line())
 
-      -- sending notification and then closing channel immediately still works
+      -- Sending notification and then closing channel immediately still works.
+      -- Use a fast API here, as a deferred API call may be aborted by EOF. #13537
       n.exec_lua(function()
-        vim.rpcnotify(id, 'nvim_set_current_line', 'bye!')
+        vim.rpcnotify(id, 'nvim_input', 'ccbye!<Esc>')
         vim.fn.chanclose(id)
       end)
 
       set_session(server)
       eq(serverpid, fn.getpid())
-      eq('bye!', api.nvim_get_current_line())
+      -- Wait for the notification to be processed.
+      t.retry(nil, 1000, function()
+        eq('bye!', api.nvim_get_current_line())
+      end)
 
       server:close()
       client:close()
@@ -324,7 +330,19 @@ describe('server -> client', function()
       set_session(server)
       local address = fn.serverlist()[1]
       local first = string.sub(address, 1, 1)
-      ok(first == '/' or first == '\\')
+      ok(first == '/')
+      connect_test(server, 'pipe', address)
+    end)
+
+    it('via named pipe containing backslashes #39382', function()
+      t.skip(not t.is_os('win'), 'N/A for non-Windows')
+      local address = [[\\.\pipe\Xtest]]
+      local server = new_session(false, {
+        args_rm = { '--listen' },
+        args = { '--listen', address },
+      })
+      set_session(server)
+      eq(vim.fs.normalize(address), api.nvim_get_vvar('servername'))
       connect_test(server, 'pipe', address)
     end)
 
@@ -358,7 +376,7 @@ describe('server -> client', function()
       connect_test(server, 'tcp', address)
     end)
 
-    it('does not crash on receiving UI events', function()
+    local function start_server_and_client()
       local server = n.new_session(false)
       set_session(server)
       local address = fn.serverlist()[1]
@@ -366,11 +384,55 @@ describe('server -> client', function()
       set_session(client)
 
       local id = fn.sockconnect('pipe', address, { rpc = true })
+
+      finally(function()
+        server:close()
+        client:close()
+      end)
+
+      return id
+    end
+
+    it('does not crash on receiving UI events', function()
+      local id = start_server_and_client()
       fn.rpcrequest(id, 'nvim_ui_attach', 80, 24, {})
       assert_alive()
+    end)
 
-      server:close()
-      client:close()
+    it('does not leak memory with channel closed before response', function()
+      local id = start_server_and_client()
+      eq(
+        ('ch %d was closed by the peer'):format(id),
+        pcall_err(n.exec_lua, function()
+          vim.rpcrequest(id, 'nvim_command', 'qall!')
+        end)
+      )
+      eq({}, api.nvim_get_chan_info(id)) -- Channel is closed.
+    end)
+
+    it('response works with channel closed just after response #24214', function()
+      local id = start_server_and_client()
+      eq(
+        'RESPONSE',
+        n.exec_lua(function()
+          local prepare = assert(vim.uv.new_prepare())
+          -- Block the event loop after writing the request but before polling for I/O
+          -- so that response and EOF arrive at the same uv_run() call.
+          prepare:start(function()
+            vim.uv.sleep(50)
+            prepare:close()
+          end)
+          return vim.rpcrequest(
+            id,
+            'nvim_exec_lua',
+            [[vim.schedule(function() vim.cmd('qall!') end); return 'RESPONSE']],
+            {}
+          )
+        end)
+      )
+      t.retry(nil, nil, function()
+        eq({}, api.nvim_get_chan_info(id)) -- Channel is closed.
+      end)
     end)
 
     it('via stdio, with many small flushes does not crash #23781', function()
@@ -387,7 +449,7 @@ describe('server -> client', function()
       call chansend(chan, 0Z71616C6C21)
       let g:statuses = jobwait([chan])
       ]])
-      eq(eval('g:statuses'), { 0 })
+      eq({ 0 }, eval('g:statuses'))
       assert_alive()
     end)
   end)

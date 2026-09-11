@@ -63,14 +63,15 @@ void wstream_set_write_cb(Stream *stream, stream_write_cb cb, void *data)
 ///
 /// @param stream The `Stream` instance
 /// @param buffer The buffer which contains data to be written
-/// @return false if the write failed
-bool wstream_write(Stream *stream, WBuffer *buffer)
+/// @return 0 on success, or libuv error code on failure
+int wstream_write(Stream *stream, WBuffer *buffer)
   FUNC_ATTR_NONNULL_ALL
 {
   assert(stream->maxmem);
   // This should not be called after a stream was freed
   assert(!stream->closed);
 
+  int err = 0;
   uv_buf_t uvbuf;
   uvbuf.base = buffer->data;
   uvbuf.len = UV_BUF_LEN(buffer->size);
@@ -79,8 +80,13 @@ bool wstream_write(Stream *stream, WBuffer *buffer)
     uv_fs_t req;
 
     // Synchronous write
-    uv_fs_write(stream->uv.idle.loop, &req, stream->fd, &uvbuf, 1, stream->fpos, NULL);
 
+#ifdef __EMSCRIPTEN__
+    // Pass -1 so the write uses the current file position.
+    err = uv_fs_write(stream->uv.idle.loop, &req, stream->fd, &uvbuf, 1, -1, NULL);
+#else
+    err = uv_fs_write(stream->uv.idle.loop, &req, stream->fd, &uvbuf, 1, stream->fpos, NULL);
+#endif
     uv_fs_req_cleanup(&req);
 
     wstream_release_wbuffer(buffer);
@@ -88,11 +94,12 @@ bool wstream_write(Stream *stream, WBuffer *buffer)
     assert(stream->write_cb == NULL);
 
     stream->fpos += MAX(req.result, 0);
-    return req.result > 0;
+    return req.result > 0 ? 0 : err != 0 ? err : UV_UNKNOWN;
   }
 
   if (stream->curmem > stream->maxmem) {
-    goto err;
+    err = UV_ENOMEM;
+    goto fail;
   }
 
   stream->curmem += buffer->size;
@@ -102,17 +109,19 @@ bool wstream_write(Stream *stream, WBuffer *buffer)
   data->buffer = buffer;
   data->uv_req.data = data;
 
-  if (uv_write(&data->uv_req, stream->uvstream, &uvbuf, 1, write_cb)) {
+  if ((err = uv_write(&data->uv_req, stream->uvstream, &uvbuf, 1, write_cb)) != 0) {
     xfree(data);
-    goto err;
+    goto fail;
   }
 
   stream->pending_reqs++;
-  return true;
+  assert(err == 0);
+  return 0;
 
-err:
+fail:
   wstream_release_wbuffer(buffer);
-  return false;
+  assert(err != 0);
+  return err;
 }
 
 /// Creates a WBuffer object for holding output data. Instances of this
